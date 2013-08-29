@@ -57,6 +57,7 @@ type platform =
 	| Cpp
 	| Cs
 	| Java
+	| D
 
 (**
 	The capture policy tells which handling we make of captured locals
@@ -596,6 +597,21 @@ let get_config com =
 			pf_pattern_matching = false;
 			pf_can_skip_non_nullable_argument = true;
 		}
+	| D ->
+		{
+			pf_static = true;
+			pf_sys = true;
+			pf_locals_scope = false;
+			pf_captured_scope = true;
+			pf_unique_locals = false;
+			pf_can_init_member = (fun _ -> false);
+			pf_capture_policy = CPWrapRef;
+			pf_pad_nulls = true;
+			pf_add_final_return = false;
+			pf_overload = true;
+			pf_pattern_matching = false;
+			pf_can_skip_non_nullable_argument = true;
+		}
 
 let create v args =
 	let m = Type.mk_mono() in
@@ -685,6 +701,7 @@ let platforms = [
 	Cpp;
 	Cs;
 	Java;
+	D;
 ]
 
 let platform_name = function
@@ -697,6 +714,7 @@ let platform_name = function
 	| Cpp -> "cpp"
 	| Cs -> "cs"
 	| Java -> "java"
+	| D -> "d"
 
 let flash_versions = List.map (fun v ->
 	let maj = int_of_float v in

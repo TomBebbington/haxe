@@ -129,7 +129,7 @@ let htmlescape s =
 	s
 
 let reserved_flags = [
-	"cross";"flash8";"js";"neko";"flash";"php";"cpp";"cs";"java";
+	"cross";"flash8";"js";"neko";"flash";"php";"cpp";"cs";"java"; "d";
 	"as3";"swc";"macro";"sys"
 	]
 
@@ -863,6 +863,9 @@ try
 		("-cpp",Arg.String (fun dir ->
 			set_platform Cpp dir;
 		),"<directory> : generate C++ code into target directory");
+		("-d",Arg.String (fun dir ->
+			set_platform D dir;
+		),"<directory> : generate D code into target directory");
  		("-cs",Arg.String (fun dir ->
 			set_platform Cs dir;
 		),"<directory> : generate C# code into target directory");
@@ -1170,6 +1173,9 @@ try
 		| Cpp ->
 			add_std "cpp";
 			"cpp"
+		| D ->
+			add_std "d";
+			"d"
 		| Cs ->
 			Gencs.before_generate com;
 			add_std "cs"; "cs"
@@ -1296,6 +1302,9 @@ try
 		| Java ->
 			Common.log com ("Generating Java in : " ^ com.file);
 			Genjava.generate com;
+		| D ->
+			Common.log com ("Generating D in : " ^ com.file);
+			Gend.generate com;
 		);
 	end;
 	Sys.catch_break false;

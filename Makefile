@@ -31,7 +31,7 @@ RELDIR=../../..
 EXPORT=../../../projects/motionTools/haxe
 
 MODULES=ast type lexer common genxml parser typecore optimizer typeload \
-codegen gencommon genas3 gencpp genjs genneko genphp genswf8 \
+codegen gencommon gend genas3 gencpp genjs genneko genphp genswf8 \
 	genswf9 genswf genjava gencs interp typer matcher dce main
 
 export HAXE_STD_PATH=$(CURDIR)/std
@@ -99,6 +99,8 @@ gencommon.cmx: type.cmx common.cmx codegen.cmx ast.cmx
 gencpp.cmx: type.cmx lexer.cmx common.cmx codegen.cmx ast.cmx
 
 gencs.cmx: type.cmx lexer.cmx gencommon.cmx common.cmx codegen.cmx ast.cmx
+
+gend.cmx: type.cmx lexer.cmx common.cmx codegen.cmx ast.cmx
 
 genjava.cmx: type.cmx gencommon.cmx common.cmx codegen.cmx ast.cmx
 
@@ -169,3 +171,6 @@ clean_tools:
 	ocamllex $<
 
 .PHONY: haxe libs
+
+unit:
+	cd tests/unit/d; haxe build.hxml
