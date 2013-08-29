@@ -23,7 +23,7 @@ package haxe;
 
 /**
 	Crossplatform JSON API : it will automatically use the optimized native API if available.
-	Use -D haxeJSON to force usage of the haXe implementation even if a native API is found : this will provide
+	Use -D haxeJSON to force usage of the Haxe implementation even if a native API is found : this will provide
 	extra encoding features such as enums (replaced by their index), Hashs and Iterable.
 **/
 #if (flash11 && !haxeJSON)
@@ -407,7 +407,7 @@ class Json {
 
 	public static function stringify( value : Dynamic, ?replacer:Dynamic -> Dynamic -> Dynamic ) : String {
 		#if (php && !haxeJSON)
-		return phpJsonEncode(value);
+		return phpJsonEncode(value, replacer);
 		#elseif (flash11 && !haxeJSON)
 		return null;
 		#else
@@ -444,7 +444,9 @@ class Json {
 			return val;
 	}
 
-	static function phpJsonEncode(val:Dynamic):String {
+	static function phpJsonEncode(val:Dynamic, ?replacer:Dynamic -> Dynamic -> Dynamic):String {
+		if(null != replacer)
+			return new Json().toString(val, replacer);
 		var json = untyped __call__("json_encode", convertBeforeEncode(val));
 		if (untyped __physeq__(json, false))
 			return throw "invalid json";

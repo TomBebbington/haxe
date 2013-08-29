@@ -44,7 +44,7 @@ type cache = {
 exception Abort
 exception Completion of string
 
-let version = 300
+let version = 310
 
 let measure_times = ref false
 let prompt = ref false
@@ -104,6 +104,18 @@ let deprecated = [
 	"Class not found : haxe.Public", "Use @:publicFields instead of implementing or extending haxe.Public";
 	"#Xml has no field createProlog", "Xml.createProlog was renamed to Xml.createProcessingInstruction";
 ]
+
+let limit_string s offset =
+	let rest = 80 - offset in
+	let words = ExtString.String.nsplit s " " in
+	let rec loop i words = match words with
+		| word :: words ->
+			if String.length word + i + 1 > rest then (Printf.sprintf "\n%*s" offset "") :: word :: loop (String.length word) words
+			else (if i = 0 then "" else " ") :: word :: loop (i + 1 + String.length word) words
+		| [] ->
+			[]
+	in
+	String.concat "" (loop 0 words)
 
 let error ctx msg p =
 	let msg = try List.assoc msg deprecated with Not_found -> msg in
@@ -494,6 +506,7 @@ let rec process_params create pl =
 
 and wait_loop boot_com host port =
 	let sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+	(try Unix.setsockopt sock Unix.SO_REUSEADDR true with _ -> ());
 	(try Unix.bind sock (Unix.ADDR_INET (Unix.inet_addr_of_string host,port)) with _ -> failwith ("Couldn't wait on " ^ host ^ ":" ^ string_of_int port));
 	Unix.listen sock 10;
 	Sys.catch_break false;
@@ -712,7 +725,7 @@ and wait_loop boot_com host port =
 		Unix.close sin;
 		(* prevent too much fragmentation by doing some compactions every X run *)
 		incr run_count;
-		if !run_count mod 1 = 50 then begin
+		if !run_count mod 10 = 0 then begin
 			let t0 = get_time() in
 			Gc.compact();
 			if verbose then begin
@@ -1030,20 +1043,23 @@ try
 			did_something := true;
 		),": print version and exit");
 		("--help-defines", Arg.Unit (fun() ->
+			let m = ref 0 in
 			let rec loop i =
 				let d = Obj.magic i in
 				if d <> Define.Last then begin
 					let t, doc = Define.infos d in
-					let str = String.concat "-" (ExtString.String.nsplit t "_") ^ " : " ^ doc in
-					str :: loop (i + 1)
+					if String.length t > !m then m := String.length t;
+					((String.concat "-" (ExtString.String.nsplit t "_")),doc) :: (loop (i + 1))
 				end else
 					[]
 			in
-			let all = List.sort String.compare (loop 0) in
+			let all = List.sort (fun (s1,_) (s2,_) -> String.compare s1 s2) (loop 0) in
+			let all = List.map (fun (n,doc) -> Printf.sprintf " %-*s: %s" !m n (limit_string doc (!m + 3))) all in
 			List.iter (fun msg -> ctx.com.print (msg ^ "\n")) all;
 			did_something := true
 		),": print help for all compiler specific defines");
 		("--help-metas", Arg.Unit (fun() ->
+			let m = ref 0 in
 			let rec loop i =
 				let d = Obj.magic i in
 				if d <> Meta.Last then begin
@@ -1067,14 +1083,16 @@ try
 							| [p] -> " (" ^ platform_name p ^ " only)"
 							| pl -> " (for " ^ String.concat "," (List.map platform_name pl) ^ ")"
 						) in
-						let str = "@" ^ t ^ params ^ " : " ^ doc ^ pfs in
-						str :: loop (i + 1)
+						let str = "@" ^ t in
+						if String.length str > !m then m := String.length str;
+						(str,params ^ doc ^ pfs) :: loop (i + 1)
 					end else
 						loop (i + 1)
 				end else
 					[]
 			in
-			let all = List.sort String.compare (loop 0) in
+			let all = List.sort (fun (s1,_) (s2,_) -> String.compare s1 s2) (loop 0) in
+			let all = List.map (fun (n,doc) -> Printf.sprintf " %-*s: %s" !m n (limit_string doc (!m + 3))) all in
 			List.iter (fun msg -> ctx.com.print (msg ^ "\n")) all;
 			did_something := true
 		),": print help for all compiler metadatas");
@@ -1100,7 +1118,7 @@ try
 		let real = Extc.get_real_path (!Parser.resume_display).Ast.pfile in
 		classes := lookup_classes com real;
 		if !classes = [] then begin
-			if not (Sys.file_exists real) then failwith "Display file does not exists";
+			if not (Sys.file_exists real) then failwith "Display file does not exist";
 			(match List.rev (ExtString.String.nsplit real "\\") with
 			| file :: _ when file.[0] >= 'a' && file.[1] <= 'z' -> failwith ("Display file '" ^ file ^ "' should not start with a lowercase letter")
 			| _ -> ());
@@ -1197,31 +1215,38 @@ try
 		com.modules <- modules;
 		let filters = [
 			Codegen.Abstract.handle_abstract_casts tctx;
+			Codegen.promote_complex_rhs com;
 			if com.foptimize then (fun e -> Optimizer.reduce_expression tctx (Optimizer.inline_constructors tctx e)) else Optimizer.sanitize tctx;
 			Codegen.check_local_vars_init;
 			Codegen.captured_vars com;
 			Codegen.rename_local_vars com;
 		] in
-		List.iter (Codegen.post_process filters) com.types;
+		List.iter (Codegen.post_process tctx filters) com.types;
 		Codegen.post_process_end();
 		List.iter (fun f -> f()) (List.rev com.filters);
 		List.iter (Codegen.save_class_state tctx) com.types;
+		List.iter (fun t ->
+			Codegen.remove_generic_base tctx t;
+			Codegen.remove_extern_fields tctx t
+		) com.types;
 		if Common.defined_value_safe com Define.DisplayMode = "usage" then
 			Codegen.detect_usage com;
 		let dce_mode = (try Common.defined_value com Define.Dce with _ -> "no") in
 		if not (!gen_as3 || dce_mode = "no" || Common.defined com Define.DocGen) then Dce.run com main (dce_mode = "full" && not !interp);
+		(* always filter empty abstract implementation classes (issue #1885) *)
+		List.iter (fun mt -> match mt with
+			| TClassDecl({cl_kind = KAbstractImpl _} as c) when c.cl_ordered_statics = [] && c.cl_ordered_fields = [] -> c.cl_extern <- true
+			| _ -> ()
+		) com.types;
 		let type_filters = [
 			Codegen.check_private_path;
-			Codegen.remove_generic_base;
 			Codegen.apply_native_paths;
 			Codegen.add_rtti;
-			Codegen.remove_extern_fields;
 			(match ctx.com.platform with | Java | Cs -> (fun _ _ -> ()) | _ -> Codegen.add_field_inits);
 			Codegen.add_meta_field;
 			Codegen.check_remove_metadata;
 			Codegen.check_void_field;
 		] in
-		let type_filters = if ctx.com.platform = Java then Codegen.promote_abstract_parameters :: type_filters else type_filters in
 		List.iter (fun t -> List.iter (fun f -> f tctx t) type_filters) com.types;
 		if ctx.has_error then raise Abort;
 		(match !xml_out with
@@ -1231,6 +1256,7 @@ try
 		| Some file ->
 			Common.log com ("Generating xml : " ^ file);
 			Genxml.generate com file);
+		if com.platform = Java then List.iter (Codegen.promote_abstract_parameters com) com.types;
 		if com.platform = Flash || com.platform = Cpp then List.iter (Codegen.fix_overrides com) com.types;
 		if Common.defined com Define.Dump then Codegen.dump_types com;
 		if Common.defined com Define.DumpDependencies then Codegen.dump_dependencies com;
@@ -1278,8 +1304,10 @@ try
 		if r <> 0 then failwith ("Command failed with error " ^ string_of_int r)
 	) (List.rev !cmds)
 with
-	| Abort | Typecore.Fatal_error ->
+	| Abort ->
 		()
+	| Typecore.Fatal_error (m,p) ->
+		error ctx m p
 	| Common.Abort (m,p) ->
 		error ctx m p
 	| Lexer.Error (m,p) ->
@@ -1348,7 +1376,7 @@ with
 			Buffer.add_string b ("<meta name=\"" ^ (fst (MetaInfo.to_string m)) ^ "\"");
 			if el = [] then Buffer.add_string b "/>" else begin
 				Buffer.add_string b ">\n";
-				List.iter (fun e -> Buffer.add_string b ((htmlescape (Genxml.sexpr e)) ^ "\n")) el;
+				List.iter (fun e -> Buffer.add_string b ((htmlescape (Ast.s_expr e)) ^ "\n")) el;
 				Buffer.add_string b "</meta>\n";
 			end
 		) m;

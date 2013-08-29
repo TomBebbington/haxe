@@ -43,6 +43,11 @@ typedef AnonType = {
 	//var status : AnonStatus;
 }
 
+typedef TypeParameter = {
+	var name: String;
+	var t: Type;
+}
+
 typedef BaseType = {
 	var pack : Array<String>;
 	var name : String;
@@ -50,7 +55,7 @@ typedef BaseType = {
 	var pos : Expr.Position;
 	var isPrivate : Bool;
 	var isExtern : Bool;
-	var params : Array<{ name : String, t : Type }>;
+	var params : Array<TypeParameter>;
 	var meta : MetaAccess;
 	var doc : Null<String>;
 	function exclude() : Void;
@@ -60,7 +65,7 @@ typedef ClassField = {
 	var name : String;
 	var type : Type;
 	var isPublic : Bool;
-	var params : Array<{ name : String, t : Type }>;
+	var params : Array<TypeParameter>;
 	var meta : MetaAccess;
 	var kind : FieldKind;
 	function expr() : Null<TypedExpr>;
@@ -99,7 +104,7 @@ typedef EnumField = {
 	var meta : MetaAccess;
 	var index : Int;
 	var doc : Null<String>;
-	var params : Array<{ name : String, t : Type }>;
+	var params : Array<TypeParameter>;
 }
 
 typedef EnumType = {> BaseType,
@@ -122,10 +127,51 @@ typedef AbstractType = {>BaseType,
 	var array : Array<ClassField>;
 }
 
+/**
+	MetaAccess is a wrapper for the `Metadata` array. It can be used to add
+	metadata to and remove metadata from its origin.
+**/
 typedef MetaAccess = {
+	/**
+		Return the wrapped `Metadata` array.
+		
+		Modifying this array has no effect on the origin of `this` MetaAccess.
+		The `add` and `remove` methods can be used for that.
+	**/
 	function get() : Expr.Metadata;
+	
+	/**
+		Adds the metadata specified by `name`, `params` and `pos` to the origin
+		of `this` MetaAccess.
+		
+		Metadata names are not unique during compilation, so this method never
+		overwrites a previous metadata.
+		
+		If a `Metadata` array is obtained through a call to `get`, a subsequent
+		call to `add` has no effect on that array.
+		
+		If any argument is null, compilation fails with an error.
+	**/
 	function add( name : String, params : Array<Expr>, pos : Expr.Position ) : Void;
+	
+	/**
+		Removes all `name` metadata entries from the origin of `this`
+		MetaAccess.
+		
+		This method might clear several metadata entries of the same name.
+		
+		If a `Metadata` array is obtained through a call to `get`, a subsequent
+		call to `remove` has no effect on that array.
+		
+		If `name` is null, compilation fails with an error.
+	**/
 	function remove( name : String ) : Void;
+	
+	/**
+		Tells if the origin of `this` MetaAccess has a `name` metadata entry.
+		
+		If `name` is null, compilation fails with an error.
+	**/
 	function has( name : String ) : Bool;
 }
 

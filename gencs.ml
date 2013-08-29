@@ -722,7 +722,8 @@ let configure gen =
   in
 
   let is_dynamic t = match real_type t with
-    | TMono _ | TDynamic _ -> true
+    | TMono _ | TDynamic _
+    | TInst({ cl_kind = KTypeParameter _ }, _) -> true
     | TAnon anon ->
       (match !(anon.a_status) with
         | EnumStatics _ | Statics _ -> false
@@ -832,7 +833,8 @@ let configure gen =
       | 13 (* \r *) -> Buffer.add_string b "\\r"
       | 10 (* \n *) -> Buffer.add_string b "\\n"
       | 9 (* \t *) -> Buffer.add_string b "\\t"
-      | c when c < 32 || c >= 127 -> Buffer.add_string b (Printf.sprintf "\\u%.4x" c)
+      | c when c < 32 || (c >= 127 && c <= 0xFFFF) -> Buffer.add_string b (Printf.sprintf "\\u%.4x" c)
+      | c when c > 0xFFFF -> Buffer.add_string b (Printf.sprintf "\\U%.8x" c)
       | c -> Buffer.add_char b (Char.chr c)
   in
 
@@ -850,7 +852,7 @@ let configure gen =
 
   let has_semicolon e =
     match e.eexpr with
-      | TBlock _ | TFor _ | TSwitch _ | TMatch _ | TTry _ | TIf _ -> false
+      | TBlock _ | TFor _ | TSwitch _ | TPatMatch _ | TTry _ | TIf _ -> false
       | TWhile (_,_,flag) when flag = Ast.NormalWhile -> false
       | _ -> true
   in
@@ -882,7 +884,7 @@ let configure gen =
     match e.eexpr with
       | TLocal _ -> e
       | TCast(e,_)
-      | TParenthesis e -> ensure_local e explain
+      | TParenthesis e | TMeta(_,e) -> ensure_local e explain
       | _ -> gen.gcon.error ("This function argument " ^ explain ^ " must be a local variable.") e.epos; e
   in
 
@@ -992,6 +994,8 @@ let configure gen =
           )
         | TParenthesis e ->
           write w "("; expr_s w e; write w ")"
+        | TMeta (_,e) ->
+            expr_s w e
         | TArrayDecl el ->
           print w "new %s" (t_s e.etype);
           write w "{";
@@ -1013,7 +1017,7 @@ let configure gen =
           write w " as ";
           write w (md_s md);
           write w " )"
-        | TCall ({ eexpr = TLocal( { v_name = "__as__" } ) }, [ expr ] ) ->
+        | TCall ({ eexpr = TLocal( { v_name = "__as__" } ) }, expr :: _ ) ->
           write w "( ";
           expr_s w expr;
           write w " as ";
@@ -1116,6 +1120,8 @@ let configure gen =
             acc + 1
           ) 0 el);
           write w ")"
+        | TNew ({ cl_kind = KTypeParameter _ } as cl, params, el) ->
+          print w "default(%s) /* This code should never be reached. It was produced by the use of @:generic on a new type parameter instance: %s */" (t_s (TInst(cl,params))) (path_param_s (TClassDecl cl) cl.cl_path params)
         | TNew (cl, params, el) ->
           write w "new ";
           write w (path_param_s (TClassDecl cl) cl.cl_path params);
@@ -1261,7 +1267,8 @@ let configure gen =
           if !strict_mode then assert false
         | TObjectDecl _ -> write w "[ obj decl not supported ]"; if !strict_mode then assert false
         | TFunction _ -> write w "[ func decl not supported ]"; if !strict_mode then assert false
-        | TMatch _ -> write w "[ match not supported ]"; if !strict_mode then assert false
+        | TPatMatch _ -> write w "[ match not supported ]"; if !strict_mode then assert false
+        | TEnumParameter _ -> write w "[ enum parameter not supported ]"; if !strict_mode then assert false
     )
     and do_call w e el =
       let params, el = extract_tparams [] el in
@@ -1898,7 +1905,7 @@ let configure gen =
     path_param_s (TClassDecl c) c.cl_path tl ^ "." ^ fname
   in
   FixOverrides.configure ~explicit_fn_name:explicit_fn_name gen;
-  NormalizeType.configure gen;
+  Normalize.configure gen ~metas:(Hashtbl.create 0);
 
   AbstractImplementationFix.configure gen;
 

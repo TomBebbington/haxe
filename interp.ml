@@ -119,6 +119,7 @@ type extern_api = {
 	current_module : unit -> module_def;
 	delayed_macro : int -> (unit -> (unit -> value));
 	use_cache : unit -> bool;
+	format_string : string -> Ast.pos -> Ast.expr;
 }
 
 type callstack = {
@@ -192,11 +193,13 @@ let decode_expr_ref = ref (fun e -> assert false)
 let encode_clref_ref = ref (fun c -> assert false)
 let enc_hash_ref = ref (fun h -> assert false)
 let enc_array_ref = ref (fun l -> assert false)
+let dec_array_ref = ref (fun v -> assert false)
 let enc_string_ref = ref (fun s -> assert false)
 let make_ast_ref = ref (fun _ -> assert false)
 let make_complex_type_ref = ref (fun _ -> assert false)
 let get_ctx() = (!get_ctx_ref)()
 let enc_array (l:value list) : value = (!enc_array_ref) l
+let dec_array (l:value) : value list = (!dec_array_ref) l
 let encode_complex_type (t:Ast.complex_type) : value = (!encode_complex_type_ref) t
 let encode_type (t:Type.t) : value = (!encode_type_ref) t
 let decode_type (v:value) : Type.t = (!decode_type_ref) v
@@ -484,7 +487,10 @@ let neko =
 	let vm = Extc.dlcall1 (load "neko_vm_alloc") null in
 	ignore(Extc.dlcall1 (load "neko_vm_select") vm);
 	let loader = Extc.dlcall2 (load "neko_default_loader") null null in
-	let loadprim = Extc.dlcall2 (load "neko_val_field") loader (Extc.dlcall1 (load "neko_val_id") (Extc.dlstring "loadprim")) in
+	let loadprim =
+		let l1 = load "neko_val_field" in
+		let l2 = Extc.dlcall1 (load "neko_val_id") (Extc.dlstring "loadprim") in
+		Extc.dlcall2 (l1) loader (l2) in
 
 	let callN = load "neko_val_callN" in
 	let callEx = load "neko_val_callEx" in
@@ -1629,7 +1635,7 @@ let std_lib =
 			VInt (((get_ctx()).curapi.get_com()).run_command (vstring cmd))
 		);
 		"sys_exit", Fun1 (fun code ->
-			if (get_ctx()).curapi.use_cache() then raise Typecore.Fatal_error;
+			if (get_ctx()).curapi.use_cache() then raise (Typecore.Fatal_error ("",Ast.null_pos));
 			exit (vint code);
 		);
 		"sys_exists", Fun1 (fun file ->
@@ -1705,7 +1711,7 @@ let std_lib =
 				if i < 0 then
 					acc
 				else
-					let e, v = ExtString.String.split "=" env.(i) in
+					let e, v = ExtString.String.split env.(i) "=" in
 					loop (VArray [|VString e;VString v;acc|]) (i - 1)
 			in
 			loop VNull (Array.length env - 1)
@@ -1760,7 +1766,7 @@ let std_lib =
 			VString (UTF8.Buf.contents buf)
 		);
 		"utf8_get", Fun2 (fun s p ->
-			VInt (UChar.uint_code (try UTF8.look (vstring s) (vint p) with _ -> error()))
+			VInt (UChar.uint_code (try UTF8.get (vstring s) (vint p) with _ -> error()))
 		);
 		"utf8_iter", Fun2 (fun s f ->
 			let ctx = get_ctx() in
@@ -2049,6 +2055,12 @@ let macro_lib =
 				raise Abort
 			| _ -> error()
 		);
+		"fatal_error", Fun2 (fun msg p ->
+			match msg, p with
+			| VString s, VAbstract (APos p) ->
+				raise (Typecore.Fatal_error (s,p))
+			| _ -> error()
+		);		
 		"warning", Fun2 (fun msg p ->
 			match msg, p with
 			| VString s, VAbstract (APos p) ->
@@ -2108,7 +2120,9 @@ let macro_lib =
 			| VFunction (Fun1 _) ->
 				let ctx = get_ctx() in
 				ctx.curapi.on_type_not_found (fun path ->
-					ctx.do_call VNull f [enc_string path] null_pos
+					match catch_errors ctx (fun () -> ctx.do_call VNull f [enc_string path] null_pos) with
+					| Some v -> v
+					| None -> VNull
 				);
 				VNull
 			| _ -> error()
@@ -2272,6 +2286,16 @@ let macro_lib =
 		);
 		"s_type", Fun1 (fun v ->
 			VString (Type.s_type (print_context()) (decode_type v))
+		);
+		"is_fmt_string", Fun1 (fun v ->
+			match v with
+			| VAbstract (APos p) -> VBool(Lexer.is_fmt_string p)
+			| _ -> VNull
+		);
+		"format_string", Fun2 (fun s p ->
+			match s,p with
+			| VString(s),VAbstract(APos p) -> encode_expr ((get_ctx()).curapi.format_string s p)
+			| _ -> VNull
 		);
 		"display", Fun1 (fun v ->
 			match v with
@@ -2440,6 +2464,28 @@ let macro_lib =
 				ctx.on_reused <- (fun() -> catch_errors ctx (fun() -> ctx.do_call VNull c [] null_pos) = Some (VBool true)) :: ctx.on_reused;
 				VNull
 			| _ -> error()
+		);
+		"apply_params", Fun3 (fun tpl tl t ->
+			let tpl = List.map (fun v ->
+				match v with
+				| VObject o ->
+					let name = match get_field o (hash "name") with VString s -> s | _ -> assert false in
+					let t = decode_type (get_field o (hash "t")) in
+					name,t
+				| _ -> assert false
+			) (dec_array tpl) in
+			let tl = List.map decode_type (dec_array tl) in
+			let rec map t = match t with
+				| TInst({cl_kind = KTypeParameter _},_) ->
+					begin try
+						(* use non-physical equality check here to make apply_params work *)
+						snd (List.find (fun (_,t2) -> type_iseq t t2) tpl)
+					with Not_found ->
+						Type.map map t
+					end
+				| _ -> Type.map map t
+			in
+			encode_type (apply_params tpl tl (map (decode_type t)))
 		);
 	]
 
@@ -3146,7 +3192,7 @@ and call ctx vthis vfun pl p =
 	ctx.vthis <- vthis;
 	ctx.callstack <- { cpos = p; cthis = oldthis; cstack = stackpos; cenv = oldenv } :: ctx.callstack;
 	ctx.callsize <- oldsize + 1;
-	if oldsize > 200 then exc (VString "Stack overflow");
+	if oldsize > 400 then exc (VString "Stack overflow");
 	let ret = (try
 		(match vfun with
 		| VClosure (vl,f) ->
@@ -4354,7 +4400,7 @@ let rec make_const e =
 		| TBool b -> VBool b
 		| TNull -> VNull
 		| TThis | TSuper -> raise Exit)
-	| TParenthesis e ->
+	| TParenthesis e | TMeta(_,e) ->
 		make_const e
 	| TObjectDecl el ->
 		VObject (obj (hash_field (get_ctx())) (List.map (fun (f,e) -> f, make_const e) el))
@@ -4493,29 +4539,10 @@ let rec make_ast e =
 		) cases in
 		let def = match eopt def with None -> None | Some (EBlock [],_) -> Some None | e -> Some e in
 		ESwitch (make_ast e,cases,def)
-	| TMatch (e,(en,_),cases,def) ->
-		let scases (idx,args,e) =
-			let p = e.epos in
-			let unused = (EConst (Ident "_"),p) in
-			let args = (match args with
-				| None -> None
-				| Some l -> Some (List.map (function None -> unused | Some v -> (EConst (Ident v.v_name),p)) l)
-			) in
-			let mk_args n =
-				match args with
-				| None -> [unused]
-				| Some args ->
-					args @ Array.to_list (Array.make (n - List.length args) unused)
-			in
-			List.map (fun i ->
-				let c = (try List.nth en.e_names i with _ -> assert false) in
-				let cfield = (try PMap.find c en.e_constrs with Not_found -> assert false) in
-				let c = (EConst (Ident c),p) in
-				(match follow cfield.ef_type with TFun (eargs,_) -> (ECall (c,mk_args (List.length eargs)),p) | _ -> c)
-			) idx, None, (match e.eexpr with TBlock [] -> None | _ -> Some (make_ast e))
-		in
-		let def = match eopt def with None -> None | Some (EBlock [],_) -> Some None | e -> Some e in
-		ESwitch (make_ast e,List.map scases cases,def)
+	| TPatMatch _
+	| TEnumParameter _ ->
+		(* these are considered complex, so the AST is handled in TMeta(Meta.Ast) *)
+		assert false
 	| TTry (e,catches) -> ETry (make_ast e,List.map (fun (v,e) -> v.v_name, (try make_type v.v_type with Exit -> assert false), make_ast e) catches)
 	| TReturn e -> EReturn (eopt e)
 	| TBreak -> EBreak
@@ -4528,7 +4555,9 @@ let rec make_ast e =
 				let t = (match t with TClassDecl c -> TInst (c,[]) | TEnumDecl e -> TEnum (e,[]) | TTypeDecl t -> TType (t,[]) | TAbstractDecl a -> TAbstract (a,[])) in
 				Some (try make_type t with Exit -> assert false)
 		) in
-		ECast (make_ast e,t))
+		ECast (make_ast e,t)
+	| TMeta ((Meta.Ast,[e1,_],_),_) -> e1
+	| TMeta (m,e) -> EMeta(m,make_ast e))
 	,e.epos)
 
 ;;
@@ -4536,6 +4565,7 @@ make_ast_ref := make_ast;
 make_complex_type_ref := make_type;
 encode_complex_type_ref := encode_ctype;
 enc_array_ref := enc_array;
+dec_array_ref := dec_array;
 encode_type_ref := encode_type;
 decode_type_ref := decode_type;
 encode_expr_ref := encode_expr;

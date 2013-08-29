@@ -45,6 +45,7 @@ type ctx = {
 	packages : (string list,unit) Hashtbl.t;
 	smap : sourcemap;
 	js_modern : bool;
+	js_flatten : bool;
 	mutable current : tclass;
 	mutable statics : (tclass * string * texpr) list;
 	mutable inits : texpr list;
@@ -58,7 +59,17 @@ type ctx = {
 	mutable found_expose : bool;
 }
 
-let s_path ctx = Ast.s_type_path
+let dot_path = Ast.s_type_path
+
+let flat_path (p,s) =
+	(* Replace _ with _$ in paths to prevent name collisions. *)
+	let escape str = String.concat "_$" (ExtString.String.nsplit str "_") in
+
+	match p with
+	| [] -> escape s
+	| _ -> String.concat "_" (List.map escape p) ^ "_" ^ (escape s)
+
+let s_path ctx = if ctx.js_flatten then flat_path else dot_path
 
 let kwds =
 	let h = Hashtbl.create 0 in
@@ -68,7 +79,7 @@ let kwds =
 		"finally"; "float"; "for"; "function"; "goto"; "if"; "implements"; "import"; "in"; "instanceof"; "int";
 		"interface"; "is"; "long"; "namespace"; "native"; "new"; "null"; "package"; "private"; "protected";
 		"public"; "return"; "short"; "static"; "super"; "switch"; "synchronized"; "this"; "throw"; "throws";
-		"transient"; "true"; "try"; "typeof"; "use"; "var"; "void"; "volatile"; "while"; "with"
+		"transient"; "true"; "try"; "typeof"; "use"; "var"; "void"; "volatile"; "while"; "window"; "with";
 	];
 	h
 
@@ -194,7 +205,7 @@ let basename path =
 
 let write_mappings ctx =
 	let basefile = basename ctx.com.file in
-	print ctx "\n//@ sourceMappingURL=%s.map" basefile;
+	print ctx "\n//# sourceMappingURL=%s.map" basefile;
 	let channel = open_out_bin (ctx.com.file ^ ".map") in
 	let sources = DynArray.to_list ctx.smap.sources in
 	let to_url file =
@@ -260,7 +271,7 @@ let rec has_return e =
 let rec iter_switch_break in_switch e =
 	match e.eexpr with
 	| TFunction _ | TWhile _ | TFor _ -> ()
-	| TSwitch _ | TMatch _ when not in_switch -> iter_switch_break true e
+	| TSwitch _ | TPatMatch _ when not in_switch -> iter_switch_break true e
 	| TBreak when in_switch -> raise Exit
 	| _ -> iter (iter_switch_break in_switch) e
 
@@ -449,6 +460,9 @@ and gen_expr ctx e =
 			print ctx "($_=";
 			gen_value ctx x;
 			print ctx ",$bind($_,$_%s))" (field f.cf_name))
+	| TEnumParameter (x,_,i) ->
+		gen_value ctx x;
+		print ctx "[%i]" (i + 2)
 	| TField (x,f) ->
 		gen_value ctx x;
 		let name = field_name f in
@@ -459,6 +473,8 @@ and gen_expr ctx e =
 		spr ctx "(";
 		gen_value ctx e;
 		spr ctx ")";
+	| TMeta (_,e) ->
+		gen_expr ctx e
 	| TReturn eo ->
 		if ctx.in_value <> None then unsupported e.epos;
 		(match eo with
@@ -636,58 +652,7 @@ and gen_expr ctx e =
 		bend();
 		newline ctx;
 		spr ctx "}";
-	| TMatch (e,(estruct,_),cases,def) ->
-		let evar = (if List.for_all (fun (_,pl,_) -> pl = None) cases then begin
-			spr ctx "switch( ";
-			gen_value ctx (if Optimizer.need_parent e then Codegen.mk_parent e else e);
-			spr ctx "[1] ) {";
-			"???"
-		end else begin
-			let v = (match e.eexpr with
-				| TLocal v -> v.v_name
-				| _ ->
-					spr ctx "var $e = ";
-					gen_value ctx e;
-					newline ctx;
-					"$e"
-			) in
-			print ctx "switch( %s[1] ) {" v;
-			v
-		end) in
-		List.iter (fun (cl,params,e) ->
-			List.iter (fun c ->
-				newline ctx;
-				print ctx "case %d:" c;
-			) cl;
-			let bend = open_block ctx in
-			(match params with
-			| None -> ()
-			| Some l ->
-				let n = ref 1 in
-				let l = List.fold_left (fun acc v -> incr n; match v with None -> acc | Some v -> (v.v_name,!n) :: acc) [] l in
-				newline ctx;
-				spr ctx "var ";
-				concat ctx ", " (fun (v,n) ->
-					print ctx "%s = %s[%d]" (ident v) evar n;
-				) l);
-			gen_block ctx e;
-			if not (has_return e) then begin
-				newline ctx;
-				print ctx "break";
-			end;
-			bend();
-		) cases;
-		(match def with
-		| None -> ()
-		| Some e ->
-			newline ctx;
-			spr ctx "default:";
-			let bend = open_block ctx in
-			gen_block ctx e;
-			bend();
-		);
-		newline ctx;
-		spr ctx "}"
+	| TPatMatch dt -> assert false
 	| TSwitch (e,cases,def) ->
 		spr ctx "switch";
 		gen_value ctx e;
@@ -784,6 +749,7 @@ and gen_value ctx e =
 	| TArray _
 	| TBinop _
 	| TField _
+	| TEnumParameter _
 	| TTypeExpr _
 	| TParenthesis _
 	| TObjectDecl _
@@ -792,6 +758,8 @@ and gen_value ctx e =
 	| TUnop _
 	| TFunction _ ->
 		gen_expr ctx e
+	| TMeta (_,e1) ->
+		gen_value ctx e1
 	| TCall (e,el) ->
 		gen_call ctx e el true
 	| TReturn _
@@ -851,13 +819,7 @@ and gen_value ctx e =
 			match def with None -> None | Some e -> Some (assign e)
 		)) e.etype e.epos);
 		v()
-	| TMatch (cond,enum,cases,def) ->
-		let v = value() in
-		gen_expr ctx (mk (TMatch (cond,enum,
-			List.map (fun (constr,params,e) -> (constr,params,assign e)) cases,
-			match def with None -> None | Some e -> Some (assign e)
-		)) e.etype e.epos);
-		v()
+	| TPatMatch dt -> assert false
 	| TTry (b,catchs) ->
 		let v = value() in
 		let block e = mk (TBlock [e]) e.etype e.epos in
@@ -947,18 +909,21 @@ let generate_class ctx c =
 	| [],"Function" -> error "This class redefine a native one" c.cl_pos
 	| _ -> ());
 	let p = s_path ctx c.cl_path in
-	generate_package_create ctx c.cl_path;
 	let hxClasses = has_feature ctx "Type.resolveClass" in
+	if ctx.js_flatten then
+		print ctx "var "
+	else
+		generate_package_create ctx c.cl_path;
 	if ctx.js_modern || not hxClasses then
 		print ctx "%s = " p
 	else
-		print ctx "%s = $hxClasses[\"%s\"] = " p p;
+		print ctx "%s = $hxClasses[\"%s\"] = " p (dot_path c.cl_path);
 	(match c.cl_constructor with
 	| Some { cf_expr = Some e } -> gen_expr ctx e
 	| _ -> print ctx "function() { }");
 	newline ctx;
 	if ctx.js_modern && hxClasses then begin
-		print ctx "$hxClasses[\"%s\"] = %s" p p;
+		print ctx "$hxClasses[\"%s\"] = %s" (dot_path c.cl_path) p;
 		newline ctx;
 	end;
 	handle_expose ctx p c.cl_meta;
@@ -1032,10 +997,13 @@ let generate_class ctx c =
 
 let generate_enum ctx e =
 	let p = s_path ctx e.e_path in
-	generate_package_create ctx e.e_path;
 	let ename = List.map (fun s -> Printf.sprintf "\"%s\"" (Ast.s_escape s)) (fst e.e_path @ [snd e.e_path]) in
+	if ctx.js_flatten then
+		print ctx "var "
+	else
+		generate_package_create ctx e.e_path;
 	print ctx "%s = " p;
-	if has_feature ctx "Type.resolveEnum" then print ctx "$hxClasses[\"%s\"] = " p;
+	if has_feature ctx "Type.resolveEnum" then print ctx "$hxClasses[\"%s\"] = " (dot_path e.e_path);
 	print ctx "{";
 	if has_feature ctx "js.Boot.isEnum" then print ctx " __ename__ : %s," (if has_feature ctx "Type.getEnumName" then "[" ^ String.concat "," ename ^ "]" else "true");
 	print ctx " __constructs__ : [%s] }" (String.concat "," (List.map (fun s -> Printf.sprintf "\"%s\"" s) e.e_names));
@@ -1074,7 +1042,10 @@ let generate_type ctx = function
 		| None -> ()
 		| Some e ->
 			ctx.inits <- e :: ctx.inits);
-		if not c.cl_extern then generate_class ctx c else if Meta.has Meta.InitPackage c.cl_meta then generate_package_create ctx c.cl_path
+		if not c.cl_extern then
+			generate_class ctx c
+		else if not ctx.js_flatten && Meta.has Meta.InitPackage c.cl_meta then
+			generate_package_create ctx c.cl_path
 	| TEnumDecl e when e.e_extern ->
 		()
 	| TEnumDecl e -> generate_enum ctx e
@@ -1100,6 +1071,7 @@ let alloc_ctx com =
 			mappings = Buffer.create 16;
 		};
 		js_modern = not (Common.defined com Define.JsClassic);
+		js_flatten = Common.defined com Define.JsFlatten;
 		statics = [];
 		inits = [];
 		current = null_class;

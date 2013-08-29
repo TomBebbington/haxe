@@ -315,6 +315,7 @@ let property ctx p t =
 	| TInst ({ cl_path = [],"Array" },_) ->
 		(match p with
 		| "length" -> ident p, Some KInt, false (* UInt in the spec *)
+		| "map" | "filter" when Common.defined ctx.com Define.NoFlashOverride -> ident (p ^ "HX"), None, true
 		| "copy" | "insert" | "remove" | "iterator" | "toString" | "map" | "filter" -> ident p , None, true
 		| _ -> as3 p, None, false);
 	| TInst ({ cl_path = ["flash"],"Vector" },_) ->
@@ -326,9 +327,14 @@ let property ctx p t =
 	| TInst ({ cl_path = [],"String" },_) ->
 		(match p with
 		| "length" (* Int in AS3/Haxe *) -> ident p, None, false
+		| "charCodeAt" when Common.defined ctx.com Define.NoFlashOverride -> ident (p ^ "HX"), None, true
 		| "charCodeAt" (* use Haxe version *) -> ident p, None, true
 		| "cca" -> as3 "charCodeAt", None, false
 		| _ -> as3 p, None, false);
+	| TInst ({ cl_path = [],"Date" },_) ->
+		(match p with
+		| "toString" when Common.defined ctx.com Define.NoFlashOverride -> ident (p ^ "HX"), None, true
+		| _ -> ident p, None, false)
 	| TAnon a ->
 		(match !(a.a_status) with
 		| Statics { cl_path = [], "Math" } ->
@@ -862,6 +868,11 @@ let rec gen_access ctx e (forset : 'a) : 'a access =
 		let id, _, _ = property ctx f e1.etype in
 		write ctx HThis;
 		VSuper id
+	| TEnumParameter (e1,_,i) ->
+		gen_expr ctx true e1;
+		write ctx (HGetProp (ident "params"));
+		write ctx (HSmallInt i);
+		VArray
 	| TField (e1,f) ->
 		let f = field_name f in
 		let id, k, closure = property ctx f e1.etype in
@@ -989,7 +1000,7 @@ let rec gen_expr_content ctx retval e =
 		gen_expr ctx true e;
 		write ctx HThrow;
 		no_value ctx retval;
-	| TParenthesis e ->
+	| TParenthesis e | TMeta (_,e) ->
 		gen_expr ctx retval e
 	| TObjectDecl fl ->
 		List.iter (fun (name,e) ->
@@ -1036,7 +1047,8 @@ let rec gen_expr_content ctx retval e =
 	| TLocal _
 	| TTypeExpr _ ->
 		getvar ctx (gen_access ctx e Read)
-	| TArray _ ->
+	(* both accesses return dynamic so let's cast them to the real type *)
+	| TEnumParameter _ | TArray _ ->
 		getvar ctx (gen_access ctx e Read);
 		coerce ctx (classify ctx e.etype)
 	| TBinop (op,e1,e2) ->
@@ -1203,7 +1215,7 @@ let rec gen_expr_content ctx retval e =
 			let rec get_int e =
 				match e.eexpr with
 				| TConst (TInt n) -> if n < 0l || n > 512l then raise Exit; Int32.to_int n
-				| TParenthesis e | TBlock [e] -> get_int e
+				| TParenthesis e | TBlock [e] | TMeta (_,e) -> get_int e
 				| _ -> raise Not_found
 			in
 			List.iter (fun (vl,_) -> List.iter (fun v ->
@@ -1273,7 +1285,7 @@ let rec gen_expr_content ctx retval e =
 		);
 		List.iter (fun j -> j()) jend;
 		branch());
-	| TMatch (e0,_,cases,def) ->
+(* 	| TMatch (e0,_,cases,def) ->
 		let t = classify ctx e.etype in
 		let rparams = alloc_reg ctx (KType (type_path ctx ([],"Array"))) in
 		let has_params = List.exists (fun (_,p,_) -> p <> None) cases in
@@ -1324,7 +1336,8 @@ let rec gen_expr_content ctx retval e =
 		) cases in
 		switch();
 		List.iter (fun j -> j()) jends;
-		free_reg ctx rparams
+		free_reg ctx rparams *)
+	| TPatMatch dt -> assert false
 	| TCast (e1,t) ->
 		gen_expr ctx retval e1;
 		if retval then begin
@@ -1358,6 +1371,11 @@ let rec gen_expr_content ctx retval e =
 and gen_call ctx retval e el r =
 	match e.eexpr , el with
 	| TLocal { v_name = "__is__" }, [e;t] ->
+		gen_expr ctx true e;
+		gen_expr ctx true t;
+		write ctx (HOp A3OIs)
+	| TField (_,FStatic ({ cl_path = [],"Std" },{ cf_name = "is" })),[e;{ eexpr = TTypeExpr (TClassDecl _) } as t] ->
+		(* fast inlining of Std.is with known values *)
 		gen_expr ctx true e;
 		gen_expr ctx true t;
 		write ctx (HOp A3OIs)
@@ -1699,15 +1717,14 @@ and generate_function ctx fdata stat =
 			| TReturn (Some e) ->
 				let rec inner_loop e =
 					match e.eexpr with
-					| TSwitch _ | TMatch _ | TFor _ | TWhile _ | TTry _ -> false
+					| TSwitch _ | TPatMatch _ | TFor _ | TWhile _ | TTry _ -> false
 					| TIf _ -> loop e
-					| TParenthesis e -> inner_loop e
+					| TParenthesis e | TMeta(_,e) -> inner_loop e
 					| _ -> true
 				in
 				inner_loop e
 			| TIf (_,e1,Some e2) -> loop e1 && loop e2
-			| TSwitch (_,_,Some e) -> loop e
-			| TParenthesis e -> loop e
+			| TParenthesis e | TMeta(_,e) -> loop e
 			| _ -> false
 		in
 		if not (loop fdata.tf_expr) then write ctx HRetVoid;
@@ -1716,7 +1733,7 @@ and generate_function ctx fdata stat =
 
 and jump_expr_gen ctx e jif jfun =
 	match e.eexpr with
-	| TParenthesis e -> jump_expr_gen ctx e jif jfun
+	| TParenthesis e | TMeta(_,e) -> jump_expr_gen ctx e jif jfun
 	| TBinop (op,e1,e2) ->
 		let j t f =
 			check_binop ctx e1 e2;
@@ -1800,7 +1817,7 @@ let rec is_const e =
 	| TConst _ -> true
 	| TArrayDecl el | TBlock el -> List.for_all is_const el
 	| TObjectDecl fl -> List.for_all (fun (_,e) -> is_const e) fl
-	| TParenthesis e -> is_const e
+	| TParenthesis e | TMeta(_,e) -> is_const e
 	| TFunction _ -> true
 	| _ -> false
 

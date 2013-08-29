@@ -93,6 +93,10 @@ type platform_config = {
 	pf_add_final_return : bool;
 	(** does the platform natively support overloaded functions *)
 	pf_overload : bool;
+	(** does the platform generator handle pattern matching *)
+	pf_pattern_matching : bool;
+	(** can the platform use default values for non-nullable arguments *)
+	pf_can_skip_non_nullable_argument : bool;
 }
 
 type context = {
@@ -167,9 +171,11 @@ module Define = struct
 		| GencommonDebug
 		| HaxeBoot
 		| HaxeVer
+		| IncludePrefix
 		| Interp
 		| JavaVer
 		| JsClassic
+		| JsFlatten
 		| Macro
 		| MacroTimes
 		| NekoSource
@@ -177,6 +183,7 @@ module Define = struct
 		| NetworkSandbox
 		| NoCompilation
 		| NoCOpt
+		| NoFlashOverride
 		| NoInline
 		| NoOpt
 		| NoPatternMatching
@@ -205,7 +212,7 @@ module Define = struct
 		| Last (* must be last *)
 
 	let infos = function
-		| AbsolutePath -> ("absolute_path","Print absoluate file path in trace output")
+		| AbsolutePath -> ("absolute_path","Print absolute file path in trace output")
 		| AdvancedTelemetry -> ("advanced-telemetry","Allow the SWF to be measured with Monocle tool")
 		| As3 -> ("as3","Defined when outputing flash9 as3 source code")
 		| CheckXmlProxy -> ("check_xml_proxy","Check the used fields of the xml proxy")
@@ -227,9 +234,11 @@ module Define = struct
 		| GencommonDebug -> ("gencommon_debug","GenCommon internal")
 		| HaxeBoot -> ("haxe_boot","Given the name 'haxe' to the flash boot class instead of a generated name")
 		| HaxeVer -> ("haxe_ver","The current Haxe version value")
+		| IncludePrefix -> ("include_prefix","prepend path to generated include files")
 		| Interp -> ("interp","The code is compiled to be run with --interp")
 		| JavaVer -> ("java_ver", "<version:5-7> Sets the Java version to be targeted")
 		| JsClassic -> ("js_classic","Don't use a function wrapper and strict mode in JS output")
+		| JsFlatten -> ("js_flatten","Generate classes to use fewer object property lookups")
 		| Macro -> ("macro","Defined when we compile code in the macro context")
 		| MacroTimes -> ("macro_times","Display per-macro timing when used with --times")
 		| NekoSource -> ("neko_source","Output neko source instead of bytecode")
@@ -237,6 +246,7 @@ module Define = struct
 		| NetworkSandbox -> ("network-sandbox","Use local network sandbox instead of local file access one")
 		| NoCompilation -> ("no-compilation","Disable CPP final compilation")
 		| NoCOpt -> ("no_copt","Disable completion optimization (for debug purposes)")
+		| NoFlashOverride -> ("no-flash-override", "Change overrides on some basic classes into HX suffixed methods, flash only")
 		| NoOpt -> ("no_opt","Disable optimizations")
 		| NoPatternMatching -> ("no_pattern_matching","Disable pattern matching")
 		| NoInline -> ("no_inline","Disable inlining")
@@ -275,6 +285,7 @@ module MetaInfo = struct
 		| TEnum
 		| TTypedef
 		| TAnyField
+		| TExpr
 
 	type meta_parameter =
 		| HasParam of string
@@ -290,6 +301,7 @@ module MetaInfo = struct
 		| Allow -> ":allow",("Allows private access from package, type or field",[HasParam "Target path";UsedOnEither [TClass;TClassField]])
 		| Annotation -> ":annotation",("Annotation (@interface) definitions on -java-lib imports will be annotated with this metadata. Has no effect on types compiled by Haxe",[Platform Java; UsedOn TClass])
 		| ArrayAccess -> ":arrayAccess",("Allows [] access on an abstract",[UsedOnEither [TAbstract;TAbstractField]])
+		| Ast -> ":ast",("Internally used to pass the AST source into the typed AST",[Internal])
 		| AutoBuild -> ":autoBuild",("Extends @:build metadata to all extending and implementing classes",[HasParam "Build macro call";UsedOn TClass])
 		| Bind -> ":bind",("Override Swf class declaration",[Platform Flash;UsedOn TClass])
 		| Bitmap -> ":bitmap",("Embeds given bitmap data into the class (must extend flash.display.BitmapData)",[HasParam "Bitmap file path";UsedOn TClass;Platform Flash])
@@ -311,11 +323,13 @@ module MetaInfo = struct
 		| DynamicObject -> ":dynamicObject",("Used internally to identify the Dynamic Object implementation",[Platforms [Java;Cs]; UsedOn TClass; Internal])
 		| Enum -> ":enum",("Used internally to annotate a class that was generated from an enum",[Platforms [Java;Cs]; UsedOn TClass; Internal])
 		| EnumConstructorParam -> ":enumConstructorParam",("Used internally to annotate GADT type parameters",[UsedOn TClass; Internal])
+		| Exhaustive -> ":exhaustive",("",[Internal])
 		| Expose -> ":expose",("Makes the class available on the window object",[HasParam "?Name=Class path";UsedOn TClass;Platform Js])
 		| Extern -> ":extern",("Marks the field as extern so it is not generated",[UsedOn TClassField])
 		| FakeEnum -> ":fakeEnum",("Treat enum as collection of values of the specified type",[HasParam "Type name";UsedOn TEnum])
 		| File -> ":file",("Includes a given binary file into the target Swf and associates it with the class (must extend flash.utils.ByteArray)",[HasParam "File path";UsedOn TClass;Platform Flash])
 		| Final -> ":final",("Prevents a class from being extended",[UsedOn TClass])
+		| FlatEnum -> ":flatEnum",("Internally used to mark an enum as being flat, i.e. having no function constructors",[UsedOn TEnum; Internal])
 		| Font -> ":font",("Embeds the given TrueType font into the class (must extend flash.text.Font)",[HasParam "TTF path";HasParam "Range String";UsedOn TClass])
 		| From -> ":from",("Specifies that the field of the abstract is a cast operation from the type identified in the function",[UsedOn TAbstractField])
 		| FunctionCode -> ":functionCode",("",[Platform Cpp])
@@ -359,7 +373,7 @@ module MetaInfo = struct
 		| Overload -> ":overload",("Allows the field to be called with different argument types",[HasParam "Function specification (no expression)";UsedOn TClassField])
 		| Public -> ":public",("Marks a class field as being public",[UsedOn TClassField])
 		| PublicFields -> ":publicFields",("Forces all class fields of inheriting classes to be public",[UsedOn TClass])
-		| PrivateAccess -> ":privateAccess",("Internally used by the typer to allow context-sensitive private access",[Internal])
+		| PrivateAccess -> ":privateAccess",("Allow private access to anything for the annotated expression",[UsedOn TExpr])
 		| Protected -> ":protected",("Marks a class field as being protected",[UsedOn TClassField])
 		| ReadOnly -> ":readOnly",("Generates a field with the 'readonly' native keyword",[Platform Cs; UsedOn TClassField])
 		| RealPath -> ":realPath",("Internally used on @:native types to retain original path information",[Internal])
@@ -376,6 +390,7 @@ module MetaInfo = struct
 		| Struct -> ":struct",("Marks a class definition as a struct.",[Platform Cs; UsedOn TClass])
 		| SuppressWarnings -> ":suppressWarnings",("Adds a SuppressWarnings annotation for the generated Java class",[Platform Java; UsedOn TClass])
 		| Throws -> ":throws",("Adds a 'throws' declaration to the generated function.",[HasParam "Type as String"; Platform Java; UsedOn TClassField])
+		| This -> ":this",("Internally used to pass a 'this' expression to macros",[Internal; UsedOn TExpr])
 		| To -> ":to",("Specifies that the field of the abstract is a cast operation to the type identified in the function",[UsedOn TAbstractField])
 		| ToString -> ":toString",("Internally used",[Internal])
 		| Transient -> ":transient",("Adds the 'transient' flag to the class field",[Platform Java; UsedOn TClassField])
@@ -432,6 +447,8 @@ let default_config =
 		pf_pad_nulls = false;
 		pf_add_final_return = false;
 		pf_overload = false;
+		pf_pattern_matching = false;
+		pf_can_skip_non_nullable_argument = true;
 	}
 
 let get_config com =
@@ -451,6 +468,8 @@ let get_config com =
 			pf_pad_nulls = false;
 			pf_add_final_return = false;
 			pf_overload = false;
+			pf_pattern_matching = false;
+			pf_can_skip_non_nullable_argument = true;
 		}
 	| Js ->
 		{
@@ -464,6 +483,8 @@ let get_config com =
 			pf_pad_nulls = false;
 			pf_add_final_return = false;
 			pf_overload = false;
+			pf_pattern_matching = false;
+			pf_can_skip_non_nullable_argument = true;
 		}
 	| Neko ->
 		{
@@ -477,6 +498,8 @@ let get_config com =
 			pf_pad_nulls = true;
 			pf_add_final_return = false;
 			pf_overload = false;
+			pf_pattern_matching = false;
+			pf_can_skip_non_nullable_argument = true;
 		}
 	| Flash when defined Define.As3 ->
 		{
@@ -490,6 +513,8 @@ let get_config com =
 			pf_pad_nulls = false;
 			pf_add_final_return = true;
 			pf_overload = false;
+			pf_pattern_matching = false;
+			pf_can_skip_non_nullable_argument = false;
 		}
 	| Flash ->
 		{
@@ -503,6 +528,8 @@ let get_config com =
 			pf_pad_nulls = false;
 			pf_add_final_return = false;
 			pf_overload = false;
+			pf_pattern_matching = false;
+			pf_can_skip_non_nullable_argument = false;
 		}
 	| Php ->
 		{
@@ -521,6 +548,8 @@ let get_config com =
 			pf_pad_nulls = true;
 			pf_add_final_return = false;
 			pf_overload = false;
+			pf_pattern_matching = false;
+			pf_can_skip_non_nullable_argument = true;
 		}
 	| Cpp ->
 		{
@@ -534,6 +563,8 @@ let get_config com =
 			pf_pad_nulls = true;
 			pf_add_final_return = true;
 			pf_overload = false;
+			pf_pattern_matching = false;
+			pf_can_skip_non_nullable_argument = true;
 		}
 	| Cs ->
 		{
@@ -547,6 +578,8 @@ let get_config com =
 			pf_pad_nulls = true;
 			pf_add_final_return = false;
 			pf_overload = true;
+			pf_pattern_matching = false;
+			pf_can_skip_non_nullable_argument = true;
 		}
 	| Java ->
 		{
@@ -560,6 +593,8 @@ let get_config com =
 			pf_pad_nulls = true;
 			pf_add_final_return = false;
 			pf_overload = true;
+			pf_pattern_matching = false;
+			pf_can_skip_non_nullable_argument = true;
 		}
 
 let create v args =
@@ -824,3 +859,5 @@ let rec close_times() =
 	| [] -> ()
 	| t :: _ -> close t; close_times()
 
+;;
+Ast.Meta.to_string_ref := fun m -> fst (MetaInfo.to_string m)

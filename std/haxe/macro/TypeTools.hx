@@ -37,15 +37,15 @@ class TypeTools {
 	#if macro
 	
 	/**
-		Follows all typedefs of [t] to reach the actual type.
+		Follows all typedefs of `t` to reach the actual type.
 		
-		If [once] is true, this function does not call itself recursively,
+		If `once` is true, this function does not call itself recursively,
 		otherwise it does. This can be useful in cases where intermediate
 		typedefs might be of interest.
 		
-		Affected types are monomorphs (TMono) and typedefs (TType(t,pl)).
+		Affected types are monomorphs `TMono` and typedefs `TType(t,pl)`.
 		
-		If [t] is null, an internal exception is thrown.
+		If `t` is null, an internal exception is thrown.
 		
 		Usage example:
 			var t = Context.typeof(macro null); // TMono(<mono>)
@@ -58,25 +58,31 @@ class TypeTools {
 		return Context.follow(t, once);
 		
 	/**
-		Returns a syntax-level type corresponding to Type [t].
+		Returns true if `t1` and `t2` unify, false otherwise.
+	**/
+	static public inline function unify( t1 : Type, t2:Type ) : Bool
+		return Context.unify(t1, t2);
 		
-		This function is mostly inverse to ComplexTypeTools.toType(), but may
+	/**
+		Returns a syntax-level type corresponding to Type `t`.
+		
+		This function is mostly inverse to `ComplexTypeTools.toType`, but may
 		lose some information on types that do not have a corresponding syntax
 		version, such as monomorphs. In these cases, the result is null.
 		
-		If [t] is null, an internal exception is thrown.
+		If `t` is null, an internal exception is thrown.
 	**/
 	static public inline function toComplexType( t : Type ) : ComplexType
 		return Context.toComplexType(t);
 		
 	/**
-		Tries to extract the class instance stored inside [t].
+		Tries to extract the class instance stored inside `t`.
 		
-		If [t] is a class instance TInst(c,pl), c is returned.
+		If `t` is a class instance `TInst(c,pl)`, c is returned.
 		
-		If [t] is of a different type, an exception of type String is thrown.
+		If `t` is of a different type, an exception of type String is thrown.
 
-		If [t] is null, the result is null.
+		If `t` is null, the result is null.
 	**/
 	static public function getClass( t : Type ) return t == null ? null : switch(follow(t)) {
 		case TInst(c, _): c.get();
@@ -84,13 +90,13 @@ class TypeTools {
 	}
 	
 	/**
-		Tries to extract the enum instance stored inside [t].
+		Tries to extract the enum instance stored inside `t`.
 		
-		If [t] is an enum instance TEnum(e,pl), e is returned.
+		If `t` is an enum instance `TEnum(e,pl)`, e is returned.
 		
-		If [t] is of a different type, an exception of type String is thrown.
+		If `t` is of a different type, an exception of type String is thrown.
 
-		If [t] is null, the result is null.
+		If `t` is null, the result is null.
 	**/
 	static public function getEnum( t : Type ) return t == null ? null : switch(follow(t)) {
 		case TEnum(e, _): e.get();
@@ -98,9 +104,50 @@ class TypeTools {
 	}
 
 	/**
-		Converts type [t] to a human-readable String representation.
+		Applies the type parameters `typeParameters` to type `t` with the given
+		types `concreteTypes`.
+		
+		This function replaces occurences of type parameters in `t` if they are
+		part of `typeParameters`. The array index of such a type parameter is
+		then used to lookup the concrete type in `concreteTypes`.
+		
+		If `typeParameters.length` is not equal to `concreteTypes.length`, an
+		exception of type `String` is thrown.
+		
+		If `typeParameters.length` is 0, `t` is returned unchanged.
+		
+		If either argument is `null`, the result is unspecified.
+	**/
+	static public function applyTypeParameters(t:Type, typeParameters:Array<TypeParameter>, concreteTypes:Array<Type>):Type {
+		if (typeParameters.length != concreteTypes.length)
+			throw 'Incompatible arguments: ${typeParameters.length} type parameters and ${concreteTypes.length} concrete types';
+		else if (typeParameters.length == 0)
+			return t;
+		return Context.load("apply_params", 3)(typeParameters.map(function(tp) return {name:untyped tp.name.__s, t:tp.t}), concreteTypes, t);
+	}
+	
+	/**
+		Converts type `t` to a human-readable String representation.
 	**/
 	static public function toString( t : Type ) : String return new String(Context.load("s_type", 1)(t));
 	#end
 	
+	/**
+		Resolves the field named `name` on class `c`.
+		
+		If `isStatic` is true, the classes' static fields are checked. Otherwise
+		the classes' member fields are checked.
+		
+		If the field is found, it is returned. Otherwise if `c` has a super
+		class, `findField` recursively checks that super class. Otherwise null
+		is returned.
+		
+		If any argument is null, the result is unspecified.
+	**/
+	static public function findField(c:ClassType, name:String, isStatic:Bool = false):Null<ClassField> {
+		var field = (isStatic ? c.statics : c.fields).get().find(function(field) return field.name == name);
+		return if(field != null) field;
+			else if (c.superClass != null) findField(c.superClass.t.get(), name, isStatic);
+			else null;
+	}
 }
