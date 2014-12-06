@@ -39,7 +39,6 @@ type context = {
 	mutable tabs : string;
 	mutable in_static : bool;
 	mutable imports : (string,string list list) Hashtbl.t;
-	mutable gen_uid : int;
 	mutable constructor_block : bool;
 	mutable block_inits : (unit -> unit) option;
 }
@@ -136,7 +135,6 @@ let init infos path =
 		in_static = false;
 		imports = imports;
 		curclass = null_class;
-		gen_uid = 0;
 		get_sets = Hashtbl.create 0;
 		constructor_block = false;
 		block_inits = None;
@@ -164,10 +162,6 @@ let close ctx =
 	) ctx.imports;);
 	output_string ctx.ch (Buffer.contents ctx.buf);
 	close_out ctx.ch
-
-let gen_local ctx l =
-	ctx.gen_uid <- ctx.gen_uid + 1;
-	if ctx.gen_uid = 1 then l else l ^ string_of_int ctx.gen_uid
 
 let spr ctx s = Buffer.add_string ctx.buf s
 let print ctx = Printf.kprintf (fun s -> Buffer.add_string ctx.buf s)
@@ -635,7 +629,6 @@ and gen_block ctx e is_val =
 let generate_field ctx static f =
 	soft_newline ctx;
 	ctx.in_static <- static;
-	ctx.gen_uid <- 0;
 	let p = ctx.curclass.cl_pos in
 	match f.cf_expr, f.cf_kind with
 	| Some { eexpr = TFunction fd }, Method (MethNormal | MethInline) ->
