@@ -168,7 +168,7 @@ let htmlescape s =
 	s
 
 let reserved_flags = [
-	"cross";"flash8";"js";"neko";"flash";"php";"cpp";"cs";"java";
+	"cross";"flash8";"js";"neko";"flash";"php";"cpp";"cs";"java";"rust";
 	"as3";"swc";"macro";"sys"
 	]
 
@@ -1047,6 +1047,9 @@ try
 			cp_libs := "hxjava" :: !cp_libs;
 			set_platform Java dir;
 		),"<directory> : generate Java code into target directory");
+		("-rust",Arg.String (fun dir ->
+			set_platform Rust dir;
+		),"<directory> : generate Rust code into target directory");
 		("-python",Arg.String (fun dir ->
 			set_platform Python dir;
 		),"<file> : generate Python code as target file");
@@ -1419,6 +1422,9 @@ try
 		| Cs ->
 			Gencs.before_generate com;
 			add_std "cs"; "cs"
+		| Rust ->
+			add_std "rust";
+			"rust"
 		| Java ->
 			let old_flush = ctx.flush in
 			ctx.flush <- (fun () ->
@@ -1527,6 +1533,9 @@ try
 		| Cpp ->
 			Common.log com ("Generating Cpp in : " ^ com.file);
 			Gencpp.generate com;
+		| Rust ->
+			Common.log com ("Generating Rust in : " ^ com.file);
+			Genrust.generate com;
 		| Cs ->
 			Common.log com ("Generating Cs in : " ^ com.file);
 			Gencs.generate com;

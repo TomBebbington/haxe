@@ -19,27 +19,17 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-package haxe.io;
+package rust;
 
-#if neko
-	typedef BytesData =	neko.NativeString;
-#elseif flash9
-	typedef BytesData =	flash.utils.ByteArray;
-#elseif php
-	typedef BytesData =	php.NativeString;
-#elseif cpp
-	extern class Unsigned_char__ { }
-	typedef BytesData = Array<Unsigned_char__>;
-#elseif java
-	typedef BytesData = java.NativeArray<java.StdTypes.Int8>;
-#elseif rust
-	typedef BytesData = rust.NativeArray<rust.StdTypes.Int8>;
-#elseif cs
-	typedef BytesData = cs.NativeArray<cs.StdTypes.UInt8>;
-#elseif python
-	typedef BytesData = python.lib.ByteArray;
-#elseif js
-	typedef BytesData = js.html.Uint8Array;
-#else
-	typedef BytesData = Array<Int>;
-#end
+/**
+ * ...
+ * @author Tom Bebbington
+ */
+
+@:nativeGen extern class NativeArray<T> implements ArrayAccess<T>
+{
+	public var length(default, null):Int;
+
+	public function new(len:Int):Void;
+
+}

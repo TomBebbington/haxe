@@ -20,6 +20,9 @@
  * DEALINGS IN THE SOFTWARE.
  */
 package haxe.io;
+#if rust
+import rust.StdTypes.Int8;
+#end
 
 class BytesBuffer {
 
@@ -35,6 +38,8 @@ class BytesBuffer {
 	var b : cs.system.io.MemoryStream;
 	#elseif java
 	var b : java.io.ByteArrayOutputStream;
+	#elseif rust
+	var b: Array<Int8>;
 	#else
 	var b : Array<Int>;
 	#end
@@ -184,6 +189,8 @@ class BytesBuffer {
 		var bytes = new Bytes(cast b.Length, buf);
 		#elseif java
 		var buf = b.toByteArray();
+		var bytes = new Bytes(buf.length, buf);
+		#elseif rust
 		var bytes = new Bytes(buf.length, buf);
 		#elseif python
 		var buf = python.lib.Builtin.bytearray(b);

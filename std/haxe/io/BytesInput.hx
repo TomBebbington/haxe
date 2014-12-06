@@ -103,7 +103,7 @@ class BytesInput extends Input {
 			#elseif java
 			return untyped b[pos++] & 0xFF;
 			#else
-			return b[pos++];
+			return cast(b[pos++]);
 			#end
 		#end
 	}

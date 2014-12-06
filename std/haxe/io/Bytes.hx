@@ -24,7 +24,9 @@ package haxe.io;
 #if cpp
 using cpp.NativeArray;
 #end
-
+#if rust
+import rust.StdTypes.Int8;
+#end
 class Bytes {
 
 	public var length(default,null) : Int;
@@ -52,7 +54,7 @@ class Bytes {
 		#elseif python
 		return python.Syntax.arrayAccess(b, pos);
 		#else
-		return b[pos];
+		return cast(b[pos]);
 		#end
 	}
 
@@ -150,6 +152,10 @@ class Bytes {
 		#elseif cs
 		var newarr = new cs.NativeArray(len);
 		cs.system.Array.Copy(b, pos, newarr, 0, len);
+		return new Bytes(len, newarr);
+		#elseif rust
+		var newarr = new rust.NativeArray(len);
+		untyped __rust__("newarr[pos..pos+len].collect::<Vec<_>>()");
 		return new Bytes(len, newarr);
 		#elseif python
 		return new Bytes(len, python.Syntax.arrayAccess(b, pos, pos+len) );
@@ -283,6 +289,9 @@ class Bytes {
 		return result;
 		#elseif cs
 		return cs.system.text.Encoding.UTF8.GetString(b, pos, len);
+		#elseif rust
+		var bytes = b;
+		return untyped __rust__("String::from_bytes(bytes)");
 		#elseif java
 		try
 			return new String(b, pos, len, "UTF-8")
@@ -381,6 +390,8 @@ class Bytes {
 		return new Bytes(length, new cs.NativeArray(length));
 		#elseif java
 		return new Bytes(length, new java.NativeArray(length));
+		#elseif rust
+		return new Bytes(length, new rust.NativeArray(length));
 		#elseif python
 		return new Bytes(length, python.lib.Builtin.bytearray(length));
 		#else
@@ -445,7 +456,7 @@ class Bytes {
 				a.push( 0x80 | (c & 63) );
 			}
 		}
-		return new Bytes(a.length,a);
+		return new Bytes(a.length,cast(a));
 		#end
 	}
 
@@ -479,7 +490,7 @@ class Bytes {
 		#elseif java
 		return untyped b[pos] & 0xFF;
 		#else
-		return b[pos];
+		return cast(b[pos]);
 		#end
 	}
 

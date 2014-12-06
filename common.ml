@@ -56,6 +56,7 @@ type platform =
 	| Php
 	| Cpp
 	| Cs
+	| Rust
 	| Java
 	| Python
 
@@ -644,6 +645,21 @@ let get_config com =
 			pf_can_skip_non_nullable_argument = true;
 			pf_ignore_unsafe_cast = false;
 		}
+	| Rust ->
+		{
+			pf_static = true;
+			pf_sys = true;
+			pf_locals_scope = true;
+			pf_captured_scope = true;
+			pf_unique_locals = true;
+			pf_capture_policy = CPWrapRef;
+			pf_pad_nulls = true;
+			pf_add_final_return = false;
+			pf_overload = false;
+			pf_pattern_matching = true;
+			pf_can_skip_non_nullable_argument = true;
+			pf_ignore_unsafe_cast = false;
+		}
 	| Java ->
 		{
 			pf_static = true;
@@ -788,6 +804,7 @@ let platform_name = function
 	| Php -> "php"
 	| Cpp -> "cpp"
 	| Cs -> "cs"
+	| Rust -> "rust"
 	| Java -> "java"
 	| Python -> "python"
 
