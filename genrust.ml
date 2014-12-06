@@ -782,11 +782,12 @@ let generate_cargo infos =
 	output_string ch "[package]\n";
 	output_string ch "name = \"haxe_project\"\n";
 	output_string ch "version = \"0.0.1\"\n";
-	output_string ch "authors = [\"Anonymoose\"]\n\n";
+	output_string ch "authors = [\"This guy\"]\n\n";
 	output_string ch ((if is_bin infos.com then "[[bin]]" else "[lib]") ^ "\n");
 	output_string ch "name = \"main\"\n";
 	output_string ch "path = \"src/__main__.rs\"\n";
 	close_out ch
+
 let add_module infos path =
 	match path with
 	| (pack :: _, _) when not (List.mem pack infos.modules) ->
