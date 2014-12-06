@@ -40,7 +40,6 @@ type context = {
 	mutable in_static : bool;
 	mutable imports : (string,string list list) Hashtbl.t;
 	mutable gen_uid : int;
-	mutable local_types : t list;
 	mutable constructor_block : bool;
 	mutable block_inits : (unit -> unit) option;
 }
@@ -67,8 +66,6 @@ let s_path ctx stat path p =
 		| "Float" -> "f64"
 		| "Dynamic" -> "Box<Dynamic>"
 		| "Bool" -> "bool"
-		| "Enum" -> "Enum"
-		| "EnumValue" -> "EnumValue"
 		| _ -> name)
 	| (["haxe"],"Int32") ->
 		"i32"
@@ -140,7 +137,6 @@ let init infos path =
 		imports = imports;
 		curclass = null_class;
 		gen_uid = 0;
-		local_types = [];
 		get_sets = Hashtbl.create 0;
 		constructor_block = false;
 		block_inits = None;
@@ -331,9 +327,7 @@ let gen_generics ctx params p =
 	end
 
 let gen_function_header ctx name f params p has_self =
-	let old_t = ctx.local_types in
 	let old_bi = ctx.block_inits in
-	ctx.local_types <- List.map snd params @ ctx.local_types;
 	print ctx "fn %s" (match name with None -> "" | Some (n,_) -> n);
 	gen_generics ctx params p;
 	spr ctx "(";
@@ -343,7 +337,6 @@ let gen_function_header ctx name f params p has_self =
 	concat ctx ", " (fun arg -> spr ctx arg) (if has_self then ["&mut self"] @ mapped_args else mapped_args);
 	print ctx ") -> %s " (type_str ctx f.tf_type p);
 	(fun () ->
-		ctx.local_types <- old_t;
 		ctx.block_inits <- old_bi;
 	)
 
@@ -684,7 +677,6 @@ let generate_class ctx c =
 	ctx.curclass <- c;
 	define_getset ctx true c;
 	define_getset ctx false c;
-	ctx.local_types <- List.map snd c.cl_params;
 	if not c.cl_interface then (
 		let instance_fields = List.filter (fun field -> match field.cf_kind with |Var _ -> true | _ -> false) c.cl_ordered_fields in
 		print ctx "pub struct %s" (snd c.cl_path);
@@ -752,7 +744,6 @@ let generate_main ctx =
 	newline ctx
 
 let generate_enum ctx e =
-	ctx.local_types <- List.map snd e.e_params;
 	print ctx "pub enum %s" (snd e.e_path);
 	gen_generics ctx e.e_params e.e_pos;
 	spr ctx " {";
