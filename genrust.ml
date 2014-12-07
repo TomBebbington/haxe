@@ -38,9 +38,8 @@ type context = {
 	mutable curclass : tclass;
 	mutable tabs : string;
 	mutable in_static : bool;
-	mutable imports : (string,string list list) Hashtbl.t;
+	mutable imports : (string list,string list) Hashtbl.t;
 	mutable constructor_block : bool;
-	mutable block_inits : (unit -> unit) option;
 }
 
 let follow = Abstract.follow_with_abstracts
@@ -59,25 +58,24 @@ let protect name =
 
 let s_path ctx stat path p =
 	match path with
-	| ([],name) ->
-		(match name with
-		| "Int" -> "i32"
-		| "Float" -> "f64"
-		| "Dynamic" -> "Box<Dynamic>"
-		| "Bool" -> "bool"
-		| _ -> name)
+	| ([],"Int") -> "i32"
+	| ([],"Float") -> "f64"
+	| ([],"Dynamic") -> "Box<Dynamic>"
+	| ([],"Bool") -> "bool"
 	| (["haxe"],"Int32") ->
 		"i32"
 	| (["haxe"],"Int64") ->
 		"i64"
 	| (pack,name) ->
 		let name = protect name in
-		let packs = (try Hashtbl.find ctx.imports name with Not_found -> []) in
-		if not (List.mem pack packs) then begin
-			Hashtbl.replace ctx.imports name (pack :: packs);
-			let crate = List.hd pack in
-			if not (List.exists (fun x -> x = crate) ctx.inf.externs) then
-				ctx.inf.externs <- ctx.inf.externs@[crate];
+		let others = (try Hashtbl.find ctx.imports pack with Not_found -> []) in
+		if not (List.mem name others) then begin
+			Hashtbl.replace ctx.imports [] (name :: others);
+			begin match pack with
+				| crate :: _ when not (List.mem crate ctx.inf.externs) ->
+					ctx.inf.externs <- ctx.inf.externs@[crate];
+				| _ -> ()
+			end
 		end;
 		match pack with [] -> name | _ -> String.concat "::" pack ^ "::" ^ name
 
@@ -123,9 +121,8 @@ let rec create_dir acc = function
 let init infos path =
 	let dir = infos.com.file :: "src" :: fst path in
 	create_dir [] dir;
-	let ch = open_out (String.concat "/" dir ^ "/" ^ String.lowercase (snd path) ^ ".rs") in
+	let ch = open_out (String.concat "/" dir ^ "/" ^ snd path ^ ".rs") in
 	let imports = Hashtbl.create 0 in
-	Hashtbl.add imports (snd path) [fst path];
 	{
 		inf = infos;
 		tabs = "";
@@ -137,12 +134,20 @@ let init infos path =
 		curclass = null_class;
 		get_sets = Hashtbl.create 0;
 		constructor_block = false;
-		block_inits = None;
 	}
 
 let close ctx =
-	(match ctx.curclass.cl_path with
-	| [], "__main__" ->
+	Hashtbl.iter (fun paths names ->
+		output_string ctx.ch ("use " ^ String.concat "" (List.map (fun path -> path ^ "::") paths) ^
+		(match names with
+		| [name] ->
+			name
+		| names ->
+			"{" ^ String.concat ", " names ^ "}"
+		)
+		^ ";\n");
+	) ctx.imports;
+	if ctx.curclass.cl_path = ([], "__main__") then begin
 		output_string ctx.ch "#![feature(phase)]\n";
 		List.iter (fun crate ->
 			match crate with
@@ -153,13 +158,7 @@ let close ctx =
 		List.iter (fun name ->
 			output_string ctx.ch ("mod " ^ name ^ ";\n")
 		) ctx.inf.modules;
-	| _ -> ();
-	Hashtbl.iter (fun name paths ->
-		List.iter (fun pack ->
-			let path = pack, name in
-			if path <> ctx.path then output_string ctx.ch ("use " ^ s_path ctx false path Ast.null_pos ^ ";\n");
-		) paths;
-	) ctx.imports;);
+	end;
 	output_string ctx.ch (Buffer.contents ctx.buf);
 	close_out ctx.ch
 
@@ -198,13 +197,6 @@ let open_block ctx =
 	(fun() -> ctx.tabs <- oldt)
 
 let should_wrap ctx t p = match follow t with
-	| TEnum (_, _)
-	| TFun (_, _)
-	| TMono _
-	| TAnon _
-	| TDynamic _
-	| TAbstract({a_path = [], ("Void" | "UInt" | "Int" | "Single" | "Float" | "Bool")}, _) -> false
-	| TAbstract _ -> true
 	| TInst({cl_kind = KNormal | KExtension _ | KExpr _ | KMacroType | KGenericBuild _},_) -> true
 	| TType ({t_path = [], "Null"}, _) ->
 		true
@@ -320,20 +312,6 @@ let gen_generics ctx params p =
 		spr ctx ">";
 	end
 
-let gen_function_header ctx name f params p has_self =
-	let old_bi = ctx.block_inits in
-	print ctx "fn %s" (match name with None -> "" | Some (n,_) -> n);
-	gen_generics ctx params p;
-	spr ctx "(";
-	let mapped_args = List.map (fun (v, c) ->
-		s_ident v.v_name ^ " : " ^ type_str ctx v.v_type p
-	) f.tf_args in
-	concat ctx ", " (fun arg -> spr ctx arg) (if has_self then ["&mut self"] @ mapped_args else mapped_args);
-	print ctx ") -> %s " (type_str ctx f.tf_type p);
-	(fun () ->
-		ctx.block_inits <- old_bi;
-	)
-
 let rec gen_call ctx e el r =
 	let gen = fun e -> gen_expr ctx e true in
 	match e.eexpr , el with
@@ -363,15 +341,6 @@ let rec gen_call ctx e el r =
 		spr ctx "(";
 		concat ctx ", " gen el;
 		spr ctx ")"
-
-and gen_field_access ctx t s =
-	match follow t with
-	| TAnon {a_status = {contents = Statics _ | EnumStatics _}}  ->
-		print ctx "::%s" (s_ident s)
-	| TAnon _  ->
-		print ctx "[\"%s\"]" (Ast.s_escape s)
-	| _ ->
-		print ctx ".%s" (s_ident s)
 
 and gen_expr ctx e is_val =
 	match e.eexpr with
@@ -425,7 +394,15 @@ and gen_expr ctx e is_val =
 	| TField( _, FStatic({ cl_path = ([], "Math") }, { cf_name = "NEGATIVE_INFINITY" }) ) ->
 		spr ctx "::std::f64::NEG_INFINITY";
 	| TField (e,s) ->
-		gen_field_access ctx e.etype (field_name s)
+		gen_expr ctx e true;
+		let name = (field_name s) in
+		(match follow e.etype with
+		| TAnon {a_status = {contents = Statics _ | EnumStatics _}}  ->
+			print ctx "::%s" (s_ident name);
+		| TAnon _  ->
+			print ctx "[\"%s\"]" (Ast.s_escape name);
+		| _ ->
+			print ctx ".%s" (s_ident name);)
 	| TTypeExpr t ->
 		spr ctx (s_path ctx true (t_path t) e.epos)
 	| TParenthesis e ->
@@ -458,7 +435,6 @@ and gen_expr ctx e is_val =
 		let bend = open_block ctx in
 		if ctx.constructor_block then
 			ctx.constructor_block <- false;
-		(match ctx.block_inits with None -> () | Some i -> i());
 		soft_newline ctx;
 		gen_expr ctx ex true;
 		bend();
@@ -469,7 +445,6 @@ and gen_expr ctx e is_val =
 		let bend = open_block ctx in
 		if ctx.constructor_block then
 			ctx.constructor_block <- false;
-		(match ctx.block_inits with None -> () | Some i -> i());
 		soft_newline ctx;
 		gen_expr ctx ex true;
 		bend();
@@ -480,7 +455,6 @@ and gen_expr ctx e is_val =
 		let bend = open_block ctx in
 		if ctx.constructor_block then
 			ctx.constructor_block <- false;
-		(match ctx.block_inits with None -> () | Some i -> i());
 		let last = List.nth el (List.length el - 1) in
 		List.iter (fun e -> 
 			block_newline ctx;
@@ -492,12 +466,15 @@ and gen_expr ctx e is_val =
 	| TBlock el ->
 		print ctx "{";
 		let bend = open_block ctx in
-		if ctx.constructor_block then
+		if ctx.constructor_block then begin
 			ctx.constructor_block <- false;
-		(match ctx.block_inits with None -> () | Some i -> i());
+			print ctx "let ref mut this: %s = ::std::default::Default::default()" (s_path ctx true ctx.curclass.cl_path e.epos);
+			newline ctx;
+		end;
 		List.iter (fun e -> 
 			block_newline ctx;
-			gen_expr ctx e false) el;
+			gen_expr ctx e false
+		) el;
 		bend();
 		newline ctx;
 		print ctx "}";
@@ -515,8 +492,9 @@ and gen_expr ctx e is_val =
 		concat ctx "," (fun el -> gen_expr ctx el true) el;
 		spr ctx "]"
 	| TThrow e ->
-		spr ctx "throw ";
+		spr ctx "panic!(";
 		gen_expr ctx e true;
+		spr ctx ")";
 	| TVar (v,eo) ->
 		spr ctx "let mut ";
 		print ctx "%s : %s" (s_ident v.v_name) (type_str ctx v.v_type e.epos);
@@ -524,8 +502,9 @@ and gen_expr ctx e is_val =
 		| None -> ()
 		| Some e ->
 			spr ctx " = ";
-			gen_expr ctx e true
-		end
+			gen_expr ctx e true;
+		end;
+		spr ctx ";"
 	| TNew (c,params,el) ->
 		print ctx "%s::new(" (s_path ctx true c.cl_path e.epos);
 		concat ctx "," (fun e -> gen_expr ctx e true) el;
@@ -535,12 +514,13 @@ and gen_expr ctx e is_val =
 		gen_expr ctx cond true;
 		spr ctx " ";
 		gen_block ctx e is_val;
-		(match eelse with
+		begin match eelse with
 		| None -> ()
 		| Some e ->
 			soft_newline ctx;
 			spr ctx " else ";
-			gen_block ctx e is_val);
+			gen_block ctx e is_val
+		end
 	| TWhile (cond,e,Ast.NormalWhile) ->
 		spr ctx "while ";
 		gen_expr ctx cond true;
@@ -594,13 +574,13 @@ and gen_expr ctx e is_val =
 			gen_expr ctx e2 is_val;
 			soft_newline ctx;
 		) cases;
-		(match def with
+		begin match def with
 		| None -> ()
 		| Some e ->
 			spr ctx "_ => ";
 			gen_expr ctx e is_val;
-			soft_newline ctx;
-		);
+			soft_newline ctx
+		end;
 		block();
 		soft_newline ctx;
 		spr ctx "}"
@@ -614,7 +594,7 @@ and gen_expr ctx e is_val =
 
 and gen_block ctx e is_val =
 	soft_newline ctx;
-	match e.eexpr with
+	begin match e.eexpr with
 	| TBlock _ ->
 		gen_expr ctx e is_val
 	| _ ->
@@ -625,6 +605,7 @@ and gen_block ctx e is_val =
 		block();
 		(if is_val then soft_newline else newline) ctx;
 		spr ctx "}"
+	end
 
 let generate_field ctx static f =
 	soft_newline ctx;
@@ -632,9 +613,15 @@ let generate_field ctx static f =
 	let p = ctx.curclass.cl_pos in
 	match f.cf_expr, f.cf_kind with
 	| Some { eexpr = TFunction fd }, Method (MethNormal | MethInline) ->
-		let h = gen_function_header ctx (Some (s_ident f.cf_name, f.cf_meta)) fd f.cf_params p (not static) in
+		print ctx "fn %s" (s_ident f.cf_name);
+		gen_generics ctx f.cf_params p;
+		spr ctx "(";
+		let mapped_args = List.map (fun (v, c) ->
+			s_ident v.v_name ^ " : " ^ type_str ctx v.v_type p
+		) fd.tf_args in
+		concat ctx ", " (fun arg -> spr ctx arg) (if (not static) then ["&mut self"] @ mapped_args else mapped_args);
+		print ctx ") -> %s " (type_str ctx fd.tf_type p);
 		gen_expr ctx fd.tf_expr true;
-		h();
 		newline ctx
 	| _ ->
 		match follow f.cf_type with
@@ -650,27 +637,9 @@ let generate_field ctx static f =
 		| _ ->
 			print ctx "pub %s: %s" f.cf_name (type_str ctx f.cf_type f.cf_pos)
 
-let rec define_getset ctx stat c =
-	let def f name =
-		Hashtbl.add ctx.get_sets (name,stat) f.cf_name
-	in
-	let field f =
-		match f.cf_kind with
-		| Method _ -> ()
-		| Var v ->
-			(match v.v_read with AccCall -> def f ("get_" ^ f.cf_name) | _ -> ());
-			(match v.v_write with AccCall -> def f ("set_" ^ f.cf_name) | _ -> ())
-	in
-	List.iter field (if stat then c.cl_ordered_statics else c.cl_ordered_fields);
-	match c.cl_super with
-	| Some (c,_) when not stat -> define_getset ctx stat c
-	| _ -> ()
-
 let generate_class ctx c =
 	ctx.curclass <- c;
-	define_getset ctx true c;
-	define_getset ctx false c;
-	if not c.cl_interface then (
+	if not c.cl_interface then begin
 		let instance_fields = List.filter (fun field -> match field.cf_kind with |Var _ -> true | _ -> false) c.cl_ordered_fields in
 		print ctx "pub struct %s" (snd c.cl_path);
 		gen_generics ctx c.cl_params c.cl_pos;
@@ -683,7 +652,7 @@ let generate_class ctx c =
 			cl();
 			soft_newline ctx;
 			spr ctx "}";
-	);
+	end;
 	newline ctx;
 	if c.cl_interface then
 		print ctx "pub trait %s" (snd c.cl_path)
@@ -826,4 +795,4 @@ let generate com =
     let old_dir = Sys.getcwd() in
     Sys.chdir com.file;
 	if com.run_command "cargo build" <> 0 then failwith "Build failed";
-	Sys.chdir old_dir;
+	Sys.chdir old_dir
