@@ -20,15 +20,15 @@
  * DEALINGS IN THE SOFTWARE.
  *)
 
+open Ast
 open Type
 open Common
 
 type context_infos = {
 	com : Common.context;
-	mutable externs : string list;
+	mutable externs : (string * bool) list;
 	mutable modules : string list;
 }
-
 type context = {
 	inf : context_infos;
 	ch : out_channel;
@@ -38,7 +38,7 @@ type context = {
 	mutable curclass : tclass;
 	mutable tabs : string;
 	mutable in_static : bool;
-	mutable imports : (string list,string list) Hashtbl.t;
+	mutable imports : (string list, (string * string option) list) Hashtbl.t;
 	mutable constructor_block : bool;
 }
 
@@ -56,7 +56,24 @@ let protect name =
 	| "mod" | "__main__" -> "_" ^ name
 	| _ -> name
 
-let s_path ctx stat path p =
+let rec find_name ctx name =
+	let exists = ref false in
+	Hashtbl.iter (fun _ names ->
+		List.iter (fun (imp, exp) ->
+			match imp, exp with
+			| _, Some cname when cname == name ->
+				exists := true;
+			| cname, None when cname == name ->
+				exists := true;
+			| _ -> ();
+		) names;
+	) ctx.imports;
+	if !exists then
+		find_name ctx ("A" ^ name)
+	else
+		name
+
+let s_path ctx path p =
 	match path with
 	| ([],"Int") -> "i32"
 	| ([],"Float") -> "f64"
@@ -66,18 +83,23 @@ let s_path ctx stat path p =
 		"i32"
 	| (["haxe"],"Int64") ->
 		"i64"
-	| (pack,name) ->
-		let name = protect name in
+	| (pack,actual_name) ->
+		let name = ref actual_name in
+		(* check if this package has imports already *)
 		let others = (try Hashtbl.find ctx.imports pack with Not_found -> []) in
-		if not (List.mem name others) then begin
-			Hashtbl.replace ctx.imports [] (name :: others);
+		(* if this type is not already in the imports *)
+		if not (List.exists (fun (this_name, _) -> actual_name == this_name) others) then begin
+			name := find_name ctx actual_name;
+			(* append it to it *)
+			Hashtbl.replace ctx.imports pack ((actual_name, if !name == actual_name then None else Some !name) :: others);
+			(* add an extern *)
 			begin match pack with
-				| crate :: _ when not (List.mem crate ctx.inf.externs) ->
-					ctx.inf.externs <- ctx.inf.externs@[crate];
+				| crate :: _ when not (List.exists (fun (name, _) -> crate == name) ctx.inf.externs) ->
+					ctx.inf.externs <- ctx.inf.externs@[crate, false];
 				| _ -> ()
 			end
 		end;
-		match pack with [] -> name | _ -> String.concat "::" pack ^ "::" ^ name
+		!name
 
 let reserved =
 	let h = Hashtbl.create 0 in
@@ -107,10 +129,6 @@ let valid_rust_ident s =
 	with Exit ->
 		false
 
-let anon_field s =
-	let s = s_ident s in
-	if not (valid_rust_ident s) then "\"" ^ s ^ "\"" else s
-
 let rec create_dir acc = function
 	| [] -> ()
 	| d :: l ->
@@ -137,24 +155,41 @@ let init infos path =
 	}
 
 let close ctx =
-	Hashtbl.iter (fun paths names ->
-		output_string ctx.ch ("use " ^ String.concat "" (List.map (fun path -> path ^ "::") paths) ^
-		(match names with
-		| [name] ->
-			name
-		| names ->
-			"{" ^ String.concat ", " names ^ "}"
-		)
-		^ ";\n");
-	) ctx.imports;
-	if ctx.curclass.cl_path = ([], "__main__") then begin
+	let is_main = ctx.curclass.cl_path = ([], "__main__") in
+	if is_main then begin
 		output_string ctx.ch "#![feature(phase)]\n";
-		List.iter (fun crate ->
+		output_string ctx.ch "#[phase(link, plugin)]\n";
+		output_string ctx.ch "extern crate haxe;\n";
+		List.iter (fun (crate, _) ->
 			match crate with
-			| "std" | "core" -> ();
-			| "haxe" -> output_string ctx.ch ("#[phase(link, plugin)]\nextern crate haxe;\n");
+			| "std" | "core" | "haxe" -> ();
 			| _ -> output_string ctx.ch ("extern crate "^crate^";\n");
 		) ctx.inf.externs;
+	end;
+	Hashtbl.iter (fun paths names ->
+		let output_path = fun _ -> output_string ctx.ch ("use " ^ String.concat "" (List.map (fun path -> path ^ "::") paths)) in
+		let last = ";\n" in
+		match names with
+		| [(name, None)] ->
+			output_path();
+			output_string ctx.ch (name ^ last)
+		| [(name, Some export)] ->
+			output_path();
+			output_string ctx.ch (name ^ " as " ^ export ^ last)
+		| names ->
+			let (unexported, exported) = List.partition (fun (_, export) -> export == None) names in
+			let unexported = List.map (fun (name, _) -> name) unexported in
+			output_path();
+			output_string ctx.ch ("{" ^ String.concat ", " unexported ^ "}" ^ last);
+			List.iter (fun (name, export) ->
+				output_path();
+				match export with
+				| Some export ->
+					output_string ctx.ch (name ^ " as " ^ export ^ last);
+				| _ -> ()
+			) exported;
+	) ctx.imports;
+	if is_main then begin
 		List.iter (fun name ->
 			output_string ctx.ch ("mod " ^ name ^ ";\n")
 		) ctx.inf.modules;
@@ -214,14 +249,21 @@ let rec type_str ctx t p =
 		| [], "Single" -> "f32"
 		| [], "Float" -> "f64"
 		| [], "Bool" -> "bool"
-		| _ -> s_path ctx true a.a_path p)
+		| _ -> s_path ctx a.a_path p)
 	| TEnum (e,_) ->
-		s_path ctx true e.e_path p
+		s_path ctx e.e_path p
 	| TInst ({ cl_path = [],"Array" },[pt]) ->
 		"Vec<" ^ type_str ctx pt p ^ ">"
+	| TInst ({ cl_path = ["rust"],"NativeArray" },[pt]) ->
+		"[" ^ type_str ctx pt p ^ "]"
+	| TInst (c,[pt]) when (c.cl_extern && Meta.has Meta.Native c.cl_meta) ->
+		begin match Meta.get Meta.Native c.cl_meta with
+			| (Meta.Native, [EConst(String path), _], _) -> s_path ctx (parse_path path) p
+			| _ -> s_path ctx c.cl_path p
+		end
 	| TInst (c,_) ->
 		(match c.cl_kind with
-		| KGeneric | KGenericInstance _ | KAbstractImpl _ | KNormal -> s_path ctx false c.cl_path p
+		| KGeneric | KGenericInstance _ | KAbstractImpl _ | KNormal -> s_path ctx c.cl_path p
 		| KTypeParameter p  ->
 			let (_, name) = c.cl_path in
 			name
@@ -252,51 +294,25 @@ let this ctx =
 	else
 		"self"
 
-let rec iter_switch_break in_switch e =
-	match e.eexpr with
-	| TFunction _ | TWhile _ | TFor _ -> ()
-	| TSwitch _ when not in_switch -> iter_switch_break true e
-	| TBreak when in_switch -> raise Exit
-	| _ -> iter (iter_switch_break in_switch) e
-
-let generate_resources infos =
-	if Hashtbl.length infos.com.resources <> 0 then begin
-		let dir = (infos.com.file :: ["__res"]) in
-		create_dir [] dir;
-		let add_resource name data =
-			let ch = open_out_bin (String.concat "/" (dir @ [name])) in
-			output_string ch data;
-			close_out ch
-		in
-		Hashtbl.iter (fun name data -> add_resource name data) infos.com.resources;
-		let ctx = init infos ([],"__resources__") in
-		spr ctx "\timport flash.utils.Dictionary;\n";
-		spr ctx "\tpublic class __resources__ {\n";
-		spr ctx "\t\tpublic static var list:Dictionary;\n";
-		let inits = ref [] in
-		let k = ref 0 in
-		Hashtbl.iter (fun name _ ->
-			let varname = ("v" ^ (string_of_int !k)) in
-			k := !k + 1;
-			print ctx "\t\t[Embed(source = \"__res/%s\", mimeType = \"application/octet-stream\")]\n" name;
-			print ctx "\t\tpublic static var %s:Class;\n" varname;
-			inits := ("list[\"" ^name^ "\"] = " ^ varname ^ ";") :: !inits;
-		) infos.com.resources;
-		spr ctx "\t\tstatic public function __init__():void {\n";
-		spr ctx "\t\t\tlist = new Dictionary();\n";
-		List.iter (fun init ->
-			print ctx "\t\t\t%s\n" init
-		) !inits;
-		spr ctx "\t\t}\n";
-		spr ctx "\t}\n";
+let generate_resources ctx =
+	if Hashtbl.length ctx.inf.com.resources <> 0 then begin
+		spr ctx "pub static RESOURCES: haxe::Resources = resources_package!{";
+		let block = open_block ctx in
+		soft_newline ctx;
+		Hashtbl.iter (fun name content ->
+			print ctx "\"%s\" => b\"%s\";" (s_escape name) (s_escape content);
+			soft_newline ctx;
+		) ctx.inf.com.resources;
+		block();
+		soft_newline ctx;
 		spr ctx "}";
-		close ctx;
+		newline ctx;
 	end
 
 let gen_constant ctx p = function
 	| TInt i -> print ctx "%ldi32" i
 	| TFloat s -> spr ctx s
-	| TString s -> print ctx "\"%s\"" (Ast.s_escape s)
+	| TString s -> print ctx "\"%s\"" (s_escape s)
 	| TBool b -> spr ctx (if b then "true" else "false")
 	| TNull -> spr ctx "None"
 	| TThis -> spr ctx (this ctx)
@@ -342,69 +358,86 @@ let rec gen_call ctx e el r =
 		concat ctx ", " gen el;
 		spr ctx ")"
 
+and gen_expr_no_paren ctx e is_val =
+	match e.eexpr with
+	| TParenthesis e -> gen_expr ctx e is_val
+	| _ -> gen_expr ctx e is_val
+
 and gen_expr ctx e is_val =
+	let default_wrap = fun gen ->
+		if should_wrap ctx e.etype e.epos then begin
+			spr ctx "Some(";
+			gen();
+			spr ctx ")";
+		end else
+			gen();
+	in
 	match e.eexpr with
 	| TConst c ->
-		gen_constant ctx e.epos c
+		default_wrap (fun _ -> gen_constant ctx e.epos c);
 	| TLocal v ->
 		spr ctx (s_ident v.v_name)
 	| TArray (e1,e2) ->
-		gen_expr ctx e1 true;
-		spr ctx "[";
-		gen_expr ctx e2 true;
-		spr ctx "]";
-	| TBinop (Ast.OpAssignOp op,e1,e2) when is_val ->
+		default_wrap (fun _ -> 
+			gen_expr ctx e1 true;
+			spr ctx "[";
+			gen_expr ctx e2 true;
+			spr ctx "]";
+		);
+	| TBinop (OpAssignOp op,e1,e2) when is_val ->
 		spr ctx "{";
 		let block = open_block ctx in
 		soft_newline ctx;
 		gen_expr ctx e1 true;
 		spr ctx " = ";
 		gen_expr ctx e1 true;
-		print ctx " %s " (Ast.s_binop op);
+		print ctx " %s " (s_binop op);
 		gen_expr ctx e2 true;
 		newline ctx;
 		gen_expr ctx e1 true;
 		block();
 		soft_newline ctx;
 		spr ctx "}";
-	| TUnop ((Ast.Not | Ast.Neg | Ast.NegBits),_,e) ->
+	| TUnop ((Not | Neg | NegBits),_,e) ->
 		spr ctx "!";
 		gen_expr ctx e true;
-	| TUnop (Ast.Decrement,_,e) ->
+	| TUnop (Decrement,_,e) ->
 		let one = mk (TConst(TInt(Int32.one))) e.etype e.epos in
-		let ex = mk (TBinop(Ast.OpAssignOp(Ast.OpSub), e, one)) e.etype e.epos in
+		let ex = mk (TBinop(OpAssignOp(OpSub), e, one)) e.etype e.epos in
 		gen_expr ctx ex is_val
-	| TUnop (Ast.Increment,_,e) ->
+	| TUnop (Increment,_,e) ->
 		let one = mk (TConst(TInt(Int32.one))) e.etype e.epos in
-		let ex = mk (TBinop(Ast.OpAssignOp(Ast.OpAdd), e, one)) e.etype e.epos in
+		let ex = mk (TBinop(OpAssignOp(OpAdd), e, one)) e.etype e.epos in
 		gen_expr ctx ex is_val
 	| TBinop (op,e1,e2) ->
 		gen_expr ctx e1 true;
-		print ctx " %s " (Ast.s_binop op);
+		print ctx " %s " (s_binop op);
 		gen_expr ctx e2 true;
 	| TEnumParameter (e,f,i) ->
 		gen_expr ctx e true;
 		print ctx ".get_params(%i)" i;
 	| TField( _, FStatic({ cl_path = ([], "Math") }, { cf_name = "NaN" }) ) ->
-		spr ctx "::std::f64::NAN";
+		default_wrap (fun _ -> spr ctx "::std::f64::NAN");
 	| TField( _, FStatic({ cl_path = ([], "Math") }, { cf_name = "PI" }) ) ->
-		spr ctx "::std::f64::consts::PI";
+		default_wrap (fun _ -> spr ctx "::std::f64::consts::PI");
 	| TField( _, FStatic({ cl_path = ([], "Math") }, { cf_name = "POSITIVE_INFINITY" }) ) ->
-		spr ctx "::std::f64::INFINITY";
+		default_wrap (fun _ -> spr ctx "::std::f64::INFINITY");
 	| TField( _, FStatic({ cl_path = ([], "Math") }, { cf_name = "NEGATIVE_INFINITY" }) ) ->
-		spr ctx "::std::f64::NEG_INFINITY";
+		default_wrap (fun _ -> spr ctx "::std::f64::NEG_INFINITY");
 	| TField (e,s) ->
 		gen_expr ctx e true;
+		if should_wrap ctx e.etype e.epos then
+			spr ctx ".unwrap()";
 		let name = (field_name s) in
 		(match follow e.etype with
 		| TAnon {a_status = {contents = Statics _ | EnumStatics _}}  ->
 			print ctx "::%s" (s_ident name);
 		| TAnon _  ->
-			print ctx "[\"%s\"]" (Ast.s_escape name);
+			print ctx "[\"%s\"]" (s_escape name);
 		| _ ->
 			print ctx ".%s" (s_ident name);)
 	| TTypeExpr t ->
-		spr ctx (s_path ctx true (t_path t) e.epos)
+		spr ctx (s_path ctx (t_path t) e.epos)
 	| TParenthesis e ->
 		spr ctx "(";
 		gen_expr ctx e is_val;
@@ -412,7 +445,7 @@ and gen_expr ctx e is_val =
 	| TMeta (_,e) ->
 		gen_expr ctx e is_val
 	| TReturn eo ->
-		(match eo with
+		begin match eo with
 		| None ->
 			spr ctx "return"
 		| Some e when (match follow e.etype with TEnum({ e_path = [],"Void" },[]) | TAbstract ({ a_path = [],"Void" },[]) -> true | _ -> false) ->
@@ -425,41 +458,42 @@ and gen_expr ctx e is_val =
 			print ctx "}";
 		| Some e ->
 			spr ctx "return ";
-			gen_expr ctx e true);
+			gen_expr ctx e true
+		end
 	| TBreak ->
 		spr ctx "break"
 	| TContinue ->
 		spr ctx "continue"
-	| TBlock [{eexpr = TReturn Some {eexpr = TBlock[ex]}}] when is_val ->
+	| TBlock [{eexpr = TReturn Some {eexpr = TBlock[ex]}}] when is_val && not ctx.constructor_block ->
 		spr ctx "{";
 		let bend = open_block ctx in
-		if ctx.constructor_block then
-			ctx.constructor_block <- false;
 		soft_newline ctx;
 		gen_expr ctx ex true;
 		bend();
 		soft_newline ctx;
 		spr ctx "}";
-	| TBlock [{eexpr = TReturn Some ex}] when is_val ->
+	| TBlock [{eexpr = TReturn Some ex}] when is_val && not ctx.constructor_block ->
 		spr ctx "{";
 		let bend = open_block ctx in
-		if ctx.constructor_block then
-			ctx.constructor_block <- false;
 		soft_newline ctx;
 		gen_expr ctx ex true;
 		bend();
 		soft_newline ctx;
 		spr ctx "}";
-	| TBlock el when is_val ->
+	| TBlock [] when is_val ->
+		spr ctx "{}";
+	| TBlock els when is_val && not ctx.constructor_block ->
+		let rec last = function
+			| x::[] -> x
+			| _::xs -> last xs
+			| []    -> failwith "no element" in
+		let last_el = last els in
 		print ctx "{";
 		let bend = open_block ctx in
-		if ctx.constructor_block then
-			ctx.constructor_block <- false;
-		let last = List.nth el (List.length el - 1) in
 		List.iter (fun e -> 
 			block_newline ctx;
-			gen_expr ctx e (e == last)
-		) el;
+			gen_expr ctx e (e == last_el)
+		) els;
 		bend();
 		soft_newline ctx;
 		print ctx "}";
@@ -468,8 +502,8 @@ and gen_expr ctx e is_val =
 		let bend = open_block ctx in
 		if ctx.constructor_block then begin
 			ctx.constructor_block <- false;
-			print ctx "let ref mut this: %s = ::std::default::Default::default()" (s_path ctx true ctx.curclass.cl_path e.epos);
-			newline ctx;
+			block_newline ctx;
+			print ctx "let ref mut this: %s = ::std::default::Default::default()" (s_path ctx ctx.curclass.cl_path e.epos);
 		end;
 		List.iter (fun e -> 
 			block_newline ctx;
@@ -488,9 +522,11 @@ and gen_expr ctx e is_val =
 	| TCall (v,el) ->
 		gen_call ctx v el e.etype
 	| TArrayDecl el ->
-		spr ctx "vec![";
-		concat ctx "," (fun el -> gen_expr ctx el true) el;
-		spr ctx "]"
+		default_wrap(fun _ ->
+			spr ctx "vec![";
+			concat ctx "," (fun el -> gen_expr ctx el true) el;
+			spr ctx "]"
+		);
 	| TThrow e ->
 		spr ctx "panic!(";
 		gen_expr ctx e true;
@@ -506,12 +542,14 @@ and gen_expr ctx e is_val =
 		end;
 		spr ctx ";"
 	| TNew (c,params,el) ->
-		print ctx "%s::new(" (s_path ctx true c.cl_path e.epos);
-		concat ctx "," (fun e -> gen_expr ctx e true) el;
-		spr ctx ")"
+		default_wrap (fun _ ->
+			print ctx "%s::new(" (s_path ctx c.cl_path e.epos);
+			concat ctx "," (fun e -> gen_expr ctx e true) el;
+			spr ctx ")"
+		);
 	| TIf (cond,e,eelse) ->
 		spr ctx "if ";
-		gen_expr ctx cond true;
+		gen_expr_no_paren ctx cond true;
 		spr ctx " ";
 		gen_block ctx e is_val;
 		begin match eelse with
@@ -521,19 +559,19 @@ and gen_expr ctx e is_val =
 			spr ctx " else ";
 			gen_block ctx e is_val
 		end
-	| TWhile (cond,e,Ast.NormalWhile) ->
+	| TWhile (cond,e,NormalWhile) ->
 		spr ctx "while ";
-		gen_expr ctx cond true;
+		gen_expr_no_paren ctx cond true;
 		spr ctx " ";
 		gen_block ctx e false;
-	| TWhile (cond,e,Ast.DoWhile) ->
+	| TWhile (cond,e,DoWhile) ->
 		spr ctx "loop {";
 		let loop = open_block ctx in
 		soft_newline ctx;
 		gen_expr ctx e false;
 		newline ctx;
 		spr ctx "if ";
-		gen_expr ctx cond true;
+		gen_expr_no_paren ctx cond true;
 		spr ctx " { break; }";
 		loop();
 		soft_newline ctx;
@@ -543,7 +581,7 @@ and gen_expr ctx e is_val =
 		let obj = open_block ctx in
 		concat ctx ", " (fun (f,e) ->
 			soft_newline ctx;
-			print ctx "\"%s\" : " (Ast.s_escape f);
+			print ctx "\"%s\" : " (s_escape f);
 			gen_expr ctx e true;
 		) fields;
 		obj();
@@ -551,7 +589,7 @@ and gen_expr ctx e is_val =
 		spr ctx "}"
 	| TFor (v,it,e) ->
 		print ctx "for %s in " (s_ident v.v_name);
-		gen_expr ctx it true;
+		gen_expr_no_paren ctx it true;
 		spr ctx " ";
 		gen_block ctx e true;
 	| TTry (e,catchs) ->
@@ -594,7 +632,7 @@ and gen_expr ctx e is_val =
 
 and gen_block ctx e is_val =
 	soft_newline ctx;
-	begin match e.eexpr with
+	match e.eexpr with
 	| TBlock _ ->
 		gen_expr ctx e is_val
 	| _ ->
@@ -605,7 +643,16 @@ and gen_block ctx e is_val =
 		block();
 		(if is_val then soft_newline else newline) ctx;
 		spr ctx "}"
-	end
+
+let is_mutable ctx e var =
+	let result = ref false in
+	Type.iter (fun e ->
+		match e.eexpr with
+		| TBinop (OpAssign, {eexpr = e}, b)
+		| TBinop (OpAssignOp _, {eexpr = e}, b) -> result := true
+		| _ -> ()
+	) e;
+	!result
 
 let generate_field ctx static f =
 	soft_newline ctx;
@@ -619,7 +666,8 @@ let generate_field ctx static f =
 		let mapped_args = List.map (fun (v, c) ->
 			s_ident v.v_name ^ " : " ^ type_str ctx v.v_type p
 		) fd.tf_args in
-		concat ctx ", " (fun arg -> spr ctx arg) (if (not static) then ["&mut self"] @ mapped_args else mapped_args);
+		let self_str = if is_mutable ctx fd.tf_expr (TConst TThis) then "&mut self" else "&self" in
+		concat ctx ", " (fun arg -> spr ctx arg) (if (not static) then [self_str] @ mapped_args else mapped_args);
 		print ctx ") -> %s " (type_str ctx fd.tf_type p);
 		gen_expr ctx fd.tf_expr true;
 		newline ctx
@@ -639,8 +687,10 @@ let generate_field ctx static f =
 
 let generate_class ctx c =
 	ctx.curclass <- c;
+	let (instance_fields, instance_methods) = List.partition (fun field -> match field.cf_kind with |Var _ -> true | _ -> false) c.cl_ordered_fields in
 	if not c.cl_interface then begin
-		let instance_fields = List.filter (fun field -> match field.cf_kind with |Var _ -> true | _ -> false) c.cl_ordered_fields in
+		spr ctx "#[deriving(Default)]";
+		soft_newline ctx;
 		print ctx "pub struct %s" (snd c.cl_path);
 		gen_generics ctx c.cl_params c.cl_pos;
 		match instance_fields with
@@ -663,12 +713,12 @@ let generate_class ctx c =
 	end;
 	(match c.cl_super with
 	| None -> ()
-	| Some (csup,_) -> print ctx ": %s " (s_path ctx true csup.cl_path c.cl_pos));
+	| Some (csup,_) -> print ctx ": %s " (s_path ctx csup.cl_path c.cl_pos));
 	(match c.cl_implements with
 	| [] -> ()
 	| l ->
 		spr ctx ":";
-		concat ctx ", " (fun (i,_) -> print ctx "%s" (s_path ctx true i.cl_path c.cl_pos)) l);
+		concat ctx ", " (fun (i,_) -> print ctx "%s" (s_path ctx i.cl_path c.cl_pos)) l);
 	spr ctx " {";
 	let cl = open_block ctx in
 	(match c.cl_constructor with
@@ -683,7 +733,6 @@ let generate_class ctx c =
 		ctx.constructor_block <- true;
 		generate_field ctx false f;
 	);
-	let instance_methods = List.filter (fun field -> match field.cf_kind with |Method _ -> true | _ -> false) c.cl_ordered_fields in
 	List.iter (generate_field ctx false) instance_methods;
 	List.iter (generate_field ctx true) c.cl_ordered_statics;
 	cl();
@@ -693,6 +742,7 @@ let generate_class ctx c =
 
 let generate_main ctx =
 	ctx.curclass <- { null_class with cl_path = [],"__main__" };
+	generate_resources ctx;
 	print ctx "pub fn main() {";
 	let fl = open_block ctx in
 	newline ctx;
@@ -741,13 +791,22 @@ let generate_cargo infos =
 	let dir = infos.com.file in
 	create_dir [] [dir];
 	let ch = open_out (dir ^ "/Cargo.toml") in
-	output_string ch "[package]\n";
-	output_string ch "name = \"haxe_project\"\n";
-	output_string ch "version = \"0.0.1\"\n";
-	output_string ch "authors = [\"This guy\"]\n\n";
-	output_string ch ((if is_bin infos.com then "[[bin]]" else "[lib]") ^ "\n");
-	output_string ch "name = \"main\"\n";
-	output_string ch "path = \"src/__main__.rs\"\n";
+	output_string ch
+("[package]
+	name = \"haxe_project\"
+	version = \"0.0.1\"
+	authors = [\"This guy\"]
+
+[" ^ (if is_bin infos.com then "[bin]" else "lib") ^ "]
+	name = \"main\"
+	path = \"src/__main__.rs\"
+
+[dependencies]
+");
+	List.iter (fun (crate, cargo) ->
+		if cargo then
+			output_string ch (crate^" = \"*\";\n");
+	) infos.externs;
 	close_out ch
 
 let add_module infos path =
@@ -764,7 +823,6 @@ let generate com =
 		externs = [];
 		modules = [];
 	} in
-	generate_resources infos;
 	List.iter (fun t ->
 		match t with
 		| TClassDecl c ->
